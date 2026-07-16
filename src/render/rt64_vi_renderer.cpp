@@ -4,8 +4,28 @@
 
 #include "rt64_vi_renderer.h"
 
+#include <algorithm>
+#include <atomic>
+
 #include "shared/rt64_hlsl.h"
 #include "shared/rt64_video_interface.h"
+
+// WR64 per-scene presentation: when enabled, the final blit to the swap chain
+// is scissored to a centered 4:3 region, pillarboxing whatever the game
+// rendered outside it. This lets a port keep AspectRatio::Expand permanently
+// (stable render-target sizes — switching UserConfiguration at runtime either
+// crashes on the framebuffer discard or ghosts stale wide targets) while
+// menus still present as 4:3. The swap chain is cleared before the VI blit,
+// so the cropped margins are true black.
+static std::atomic<bool> wr64PresentCrop43{false};
+
+extern "C" void rt64_wr64_set_present_crop43(int enabled) {
+    wr64PresentCrop43.store(enabled != 0, std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_get_present_crop43() {
+    return wr64PresentCrop43.load(std::memory_order_relaxed) ? 1 : 0;
+}
 
 namespace RT64 {
     // VIRenderer
@@ -121,5 +141,13 @@ namespace RT64 {
 
         viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
         scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
+
+        if (wr64PresentCrop43.load(std::memory_order_relaxed)) {
+            const float scissorHeight = float(scissor.bottom - scissor.top);
+            const float centerX = (float(scissor.left) + float(scissor.right)) * 0.5f;
+            const float halfWidth = scissorHeight * (4.0f / 3.0f) * 0.5f;
+            scissor.left = std::max(scissor.left, int32_t(lround(centerX - halfWidth)));
+            scissor.right = std::min(scissor.right, int32_t(lround(centerX + halfWidth)));
+        }
     }
 };

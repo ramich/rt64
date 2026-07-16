@@ -4,6 +4,7 @@
 
 #include "rt64_rsp.h"
 
+#include <atomic>
 #include <cassert>
 
 #include "../include/rt64_extended_gbi.h"
@@ -16,6 +17,29 @@
 #include "rt64_state.h"
 
 //#define LOG_SPECIAL_MATRIX_OPERATIONS
+
+// WR64 scene classifier: count perspective projections at a segment-3 (world)
+// address that geometry is actually drawn under. Merely loading the world
+// matrix is not enough — WR64's menus load it every frame without drawing
+// anything with it. addCurrentProjection() is only reached when vertices or
+// draws land under the projection, so this counter means "world was rendered".
+//
+// The 2D menus (watercraft select) still render a parked world scene (the
+// prop jetskis) behind their fullscreen backdrop — but they use a dedicated
+// fovy=50 camera (m11 = cot(25 deg) = 2.148331, bit-stable guPerspective
+// output), while live scenes use 45 (2.414215), demo cams 75 (1.301849),
+// etc. Draws under the 50-degree camera count as menu-world instead.
+static std::atomic<uint32_t> wr64WorldProjLoads{0};
+static std::atomic<uint32_t> wr64MenuWorldProjLoads{0};
+static float wr64LastSeg3ProjM11 = 0.0f;
+
+extern "C" uint32_t rt64_wr64_world_proj_loads() {
+    return wr64WorldProjLoads.load(std::memory_order_relaxed);
+}
+
+extern "C" uint32_t rt64_wr64_menu_world_proj_loads() {
+    return wr64MenuWorldProjLoads.load(std::memory_order_relaxed);
+}
 
 namespace RT64 {
     // RSP
@@ -140,6 +164,9 @@ namespace RT64 {
         uint32_t &projectionMatrixPhysicalAddress = projectionMatrixPhysicalAddressStack[projectionMatrixStackSize - 1];
         if (params & projMask) {
             if (params & loadMask) {
+                if ((address >> 24) == 0x03) {
+                    wr64LastSeg3ProjM11 = float(floatMatrix[1].y);
+                }
                 // TEMP (WR64 culling hunt): log decoded projection loads.
                 static int wr64_dbg_count = 0;
                 if ((wr64_dbg_count++ % 120) == 0) {
@@ -457,6 +484,13 @@ namespace RT64 {
     }
     
     void RSP::addCurrentProjection(Projection::Type type) {
+        if ((type == Projection::Type::Perspective) &&
+            ((projectionMatrixSegmentedAddressStack[projectionMatrixStackSize - 1] >> 24) == 0x03)) {
+            const bool menuCam = fabsf(wr64LastSeg3ProjM11 - 2.148331f) < 0.001f;
+            (menuCam ? wr64MenuWorldProjLoads : wr64WorldProjLoads)
+                .fetch_add(1, std::memory_order_relaxed);
+        }
+
         const int workloadCursor = state->ext.workloadQueue->writeCursor;
         Workload &workload = state->ext.workloadQueue->workloads[workloadCursor];
         if (extended.viewProjMatrixIdStackChanged) {

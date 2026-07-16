@@ -16,6 +16,10 @@
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_worker.h"
 
+// WR64 patch, defined in rt64_vi_renderer.cpp: whether the present blit is
+// currently cropped to 4:3 (menu presentation).
+extern "C" int rt64_wr64_get_present_crop43();
+
 // TODO: Move to shared.
 
 namespace interop {
@@ -1431,9 +1435,17 @@ namespace RT64 {
         targetDrawCall.fbStorage = p.fbStorage;
         targetDrawCall.sceneIndices.clear();
 
-        const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
+        // 0.1 -> 0.15: accept Wave Race 64's 1.525-ratio menu scissor so 2D aspect
+        // compensation engages on unmodified menu frames.
+        const float SimilarityPercentage = 0.15f; // TODO: Make more strict once VI ratios are in.
         const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
-        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
+        // WR64 (rt64_vi_renderer.cpp): while the present blit is cropped to
+        // 4:3 for menus, every fbPair must render 4:3-faithful — fbPairs with
+        // odd scissor ratios (the menu's square preview boxes) otherwise skip
+        // the compensation and their content lands at wide-spread positions,
+        // outside the cropped region.
+        const bool adjustRatio = (rt64_wr64_get_present_crop43() != 0) ||
+            (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
         InstanceDrawCall instanceDrawCall;
         interop::RenderIndices renderIndices;
@@ -1491,6 +1503,15 @@ namespace RT64 {
                 bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
+                // WR64: while the present blit is cropped to 4:3, nothing may
+                // take the widened-viewport path — WR64's menus draw their
+                // preview models through framebuffer-spanning viewports that
+                // this heuristic mistakes for world content, spreading them
+                // outside the crop. The squeezed path places them exactly as
+                // the original 4:3 layout.
+                if (rt64_wr64_get_present_crop43() != 0) {
+                    useWideViewport = false;
+                }
                 if (useWideViewport) {
                     projInvRatioScale = 1.0f;
                 }
@@ -1504,6 +1525,22 @@ namespace RT64 {
                 }
 
                 viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
+
+                // TEMP (WR64 menu-placement hunt): dump per-projection layout
+                // decisions while cropped presentation is active.
+                static const char *wr64FbpDbg = getenv("WR64_FBP_DEBUG");
+                if (wr64FbpDbg && wr64FbpDbg[0] == '1' && rt64_wr64_get_present_crop43()) {
+                    static int wr64FbpCount = 0;
+                    if ((wr64FbpCount++ % 200) < 12) {
+                        const FixedRect vr = viewport.rect(viewportClipRatios);
+                        fprintf(stderr, "[FBP] pairScissor=(%d,%d,%d,%d) adj=%d projType=%d vp=(%d,%d,%d,%d) wideVp=%d scaleX=%f clip=(%.0f,%.0f,%.0f,%.0f)\n",
+                            fbPair.scissorRect.ulx, fbPair.scissorRect.uly, fbPair.scissorRect.lrx, fbPair.scissorRect.lry,
+                            (int)adjustRatio, (int)proj.type,
+                            vr.ulx, vr.uly, vr.lrx, vr.lry,
+                            (int)useWideViewport, triangles.screenScale.x,
+                            viewportClip.x, viewportClip.y, viewportClip.width, viewportClip.height);
+                    }
+                }
             }
 
             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {

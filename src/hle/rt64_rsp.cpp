@@ -140,6 +140,14 @@ namespace RT64 {
         uint32_t &projectionMatrixPhysicalAddress = projectionMatrixPhysicalAddressStack[projectionMatrixStackSize - 1];
         if (params & projMask) {
             if (params & loadMask) {
+                // TEMP (WR64 culling hunt): log decoded projection loads.
+                static int wr64_dbg_count = 0;
+                if ((wr64_dbg_count++ % 120) == 0) {
+                    fprintf(stderr, "[RT64-PROJ] seg=0x%08X phys=0x%08X m00=%f m11=%f m22=%f m32=%f m33=%f\n",
+                        address, fromSegmentedMasked(address),
+                        float(floatMatrix[0].x), float(floatMatrix[1].y), float(floatMatrix[2].z),
+                        float(floatMatrix[3].z), float(floatMatrix[3].w));
+                }
                 viewProjMatrix = floatMatrix;
 
                 if (isMatrixViewProj(floatMatrix)) {

@@ -1082,7 +1082,13 @@ namespace RT64 {
         extended.drawExtendedFlags = {};
         extended.global.rect = ExtendedAlignment();
         extended.global.scissor = ExtendedAlignment();
-        extended.global.rectAspect = G_EX_ASPECT_AUTO;
+        // Default aspect for rects without extended-GBI tags; the env override
+        // lets ports offer stretched 2D as a user preference (see rt64_state).
+        static const uint8_t defaultRectAspect = []() -> uint8_t {
+            const char *v = getenv("RT64_RECT_ASPECT_DEFAULT");
+            return (v != nullptr && strcmp(v, "stretch") == 0) ? G_EX_ASPECT_STRETCH : G_EX_ASPECT_AUTO;
+        }();
+        extended.global.rectAspect = defaultRectAspect;
     }
     
     void RDP::drawTris(uint32_t triCount, const float *pos, const float *tc, const float *col, uint8_t tile, uint8_t levels) {

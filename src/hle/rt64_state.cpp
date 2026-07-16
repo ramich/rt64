@@ -106,7 +106,14 @@ namespace RT64 {
         drawCall.rectDtdy = 0;
         drawCall.rectLeftOrigin = G_EX_ORIGIN_NONE;
         drawCall.rectRightOrigin = G_EX_ORIGIN_NONE;
-        drawCall.rectAspect = G_EX_ASPECT_AUTO;
+        // Default aspect mode for rects without extended-GBI tags. AUTO keeps
+        // HUD elements proportional under aspect expansion; the env override
+        // lets ports offer stretched HUD as a user preference.
+        static const uint8_t defaultRectAspect = []() -> uint8_t {
+            const char *v = getenv("RT64_RECT_ASPECT_DEFAULT");
+            return (v != nullptr && strcmp(v, "stretch") == 0) ? G_EX_ASPECT_STRETCH : G_EX_ASPECT_AUTO;
+        }();
+        drawCall.rectAspect = defaultRectAspect;
         drawCall.scissorRect.reset();
         drawCall.scissorMode = 0;
         drawCall.scissorLeftOrigin = G_EX_ORIGIN_NONE;

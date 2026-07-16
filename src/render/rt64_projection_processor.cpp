@@ -98,6 +98,18 @@ namespace RT64 {
                 }
             }
  
+            // Env override paired with the rect-aspect default in rt64_state:
+            // when the port requests stretched 2D, orthographic scenes skip the
+            // aspect compensation (perspective scenes keep it — that is what
+            // produces the widescreen expansion).
+            static const bool stretchOrtho = []() {
+                const char *v = getenv("RT64_RECT_ASPECT_DEFAULT");
+                return v != nullptr && strcmp(v, "stretch") == 0;
+            }();
+            if (stretchOrtho && (proj.type == Projection::Type::Orthographic)) {
+                adjustAspectRatio = false;
+            }
+
             float projRatioScale = adjustAspectRatio ? (1.0f / p.aspectRatioScale) : 1.0f;
             interop::float4x4 &viewMatrix = drawData.modViewTransforms[proj.transformsIndex];
             interop::float4x4 &projMatrix = drawData.modProjTransforms[proj.transformsIndex];

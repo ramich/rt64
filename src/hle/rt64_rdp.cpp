@@ -967,11 +967,57 @@ namespace RT64 {
         state->updateDrawStatusAttribute(DrawAttribute::PrimDepth);
     }
 
+    // WR64: widen the game's inner-view-rect scissor wherever it appears.
+    // The port rewrites G_SETSCISSOR words in the top-level display list, but
+    // Wave Race 64 also sets the same scissor from branched sub-DLs (the
+    // wave-mesh/water pass) that a top-level walk never sees — leaving the
+    // water clipped to the inner rect while everything else widens. This
+    // filter catches ALL scissors at processing time, after segment
+    // resolution. Coordinates are 10.2 fixed; the signature matches the
+    // port-side rewrite: ul <= (10,22), lr >= (300,214) and plausibly sized.
+    //
+    // Selectivity: several passes share the inner-rect scissor and widening
+    // ALL of them breaks compositing (a far-ocean/horizon layer paints over
+    // the terrain margins). Matching scissors are indexed per frame in
+    // processing order; only indices whose bit is set in the mask are
+    // widened. The port resets the counter each frame via the enable setter
+    // and picks the mask (WR64_SCISSOR_MASK) — bisect it to isolate the
+    // water pass.
+    static int wr64ScissorWiden = 0;
+    static uint32_t wr64ScissorMask = 0xFFFFFFFFu;
+    static uint32_t wr64ScissorIndex = 0;
+    static uint32_t wr64ScissorLastCount = 0;
+
+    extern "C" void rt64_wr64_set_scissor_widen(int enable) {
+        wr64ScissorWiden = enable;
+        wr64ScissorLastCount = wr64ScissorIndex;
+        wr64ScissorIndex = 0; // frame boundary
+    }
+
+    extern "C" void rt64_wr64_set_scissor_widen_mask(uint32_t mask) {
+        wr64ScissorMask = mask;
+    }
+
+    extern "C" uint32_t rt64_wr64_scissor_match_count() {
+        return wr64ScissorLastCount;
+    }
+
     void RDP::setScissor(uint8_t mode, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry) {
         setScissor(mode, ulx, uly, lrx, lry, extended.global.scissor);
     }
-    
+
     void RDP::setScissor(uint8_t mode, int32_t ulx, int32_t uly, int32_t lrx, int32_t lry, const ExtendedAlignment &extAlignment) {
+        if (wr64ScissorWiden &&
+            (ulx <= 40) && (uly <= 88) && (lrx >= 1200) && (lry >= 856) && (lrx <= 1300) && (lry <= 980)) {
+            const uint32_t idx = wr64ScissorIndex < 31 ? wr64ScissorIndex : 31;
+            wr64ScissorIndex++;
+            if ((wr64ScissorMask >> idx) & 1u) {
+                ulx = 0;
+                uly = 0;
+                lrx = 1280;
+                lry = 960;
+            }
+        }
         FixedRect &scissorRect = scissorRectStack[scissorStackSize - 1];
         scissorRect.ulx = std::clamp(movedFromOrigin(ulx + extAlignment.leftOffset, extAlignment.leftOrigin), extAlignment.leftBound, extAlignment.rightBound);
         scissorRect.uly = std::clamp(uly + extAlignment.topOffset, extAlignment.topBound, extAlignment.bottomBound);

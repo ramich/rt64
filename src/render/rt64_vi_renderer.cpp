@@ -27,6 +27,21 @@ extern "C" int rt64_wr64_get_present_crop43() {
     return wr64PresentCrop43.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+// WR64 wide-world mode: while enabled (gameplay frames with border removal
+// active), perspective projections whose scissor covers the framebuffer-pair
+// scissor take the wide-viewport path even when the game's camera-bob
+// viewport translation would fail the usual intersection test (see
+// rt64_framebuffer_renderer.cpp).
+static std::atomic<bool> wr64WideWorld{false};
+
+extern "C" void rt64_wr64_set_wide_world(int enabled) {
+    wr64WideWorld.store(enabled != 0, std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_get_wide_world() {
+    return wr64WideWorld.load(std::memory_order_relaxed) ? 1 : 0;
+}
+
 namespace RT64 {
     // VIRenderer
 

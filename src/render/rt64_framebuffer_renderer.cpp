@@ -19,6 +19,7 @@
 // WR64 patch, defined in rt64_vi_renderer.cpp: whether the present blit is
 // currently cropped to 4:3 (menu presentation).
 extern "C" int rt64_wr64_get_present_crop43();
+extern "C" int rt64_wr64_get_wide_world();
 
 // TODO: Move to shared.
 
@@ -1503,6 +1504,22 @@ namespace RT64 {
                 bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
+                // WR64: the game applies camera bob by TRANSLATING its
+                // full-size world viewport per frame. The shifted viewport
+                // shrinks intersectionRect below the pair scissor width and
+                // knocks the world off the wide path mid-race (visible as
+                // the whole scene collapsing into the original-width center
+                // band). When the port has wide-world mode on, qualify
+                // gameplay perspective projections by their SCISSOR coverage
+                // alone, ignoring the bobbing viewport.
+                if (rt64_wr64_get_wide_world() != 0 &&
+                    (proj.type == Projection::Type::Perspective) &&
+                    (viewportOrigin == G_EX_ORIGIN_NONE) &&
+                    !proj.scissorRect.isNull() &&
+                    (proj.scissorRect.ulx <= fbPair.scissorRect.ulx) &&
+                    (proj.scissorRect.lrx >= fbPair.scissorRect.lrx)) {
+                    useWideViewport = true;
+                }
                 // WR64: while the present blit is cropped to 4:3, nothing may
                 // take the widened-viewport path — WR64's menus draw their
                 // preview models through framebuffer-spanning viewports that
@@ -1526,19 +1543,23 @@ namespace RT64 {
 
                 viewportClip = convertViewportRect(viewport.rect(viewportClipRatios), p.resolutionScale, p.fbWidth, projInvRatioScale, extOriginPercentage, 0.0f, viewportOrigin, viewportOrigin);
 
-                // TEMP (WR64 menu-placement hunt): dump per-projection layout
-                // decisions while cropped presentation is active.
+                // TEMP (WR64 layout hunts): dump per-projection layout
+                // decisions (all frames — originally gated to the cropped
+                // menu presentation, now also needed for the gameplay
+                // squeezed-vs-wide path diagnosis).
                 static const char *wr64FbpDbg = getenv("WR64_FBP_DEBUG");
-                if (wr64FbpDbg && wr64FbpDbg[0] == '1' && rt64_wr64_get_present_crop43()) {
+                if (wr64FbpDbg && wr64FbpDbg[0] == '1') {
                     static int wr64FbpCount = 0;
-                    if ((wr64FbpCount++ % 200) < 12) {
+                    if ((wr64FbpCount++ % 400) < 12) {
                         const FixedRect vr = viewport.rect(viewportClipRatios);
-                        fprintf(stderr, "[FBP] pairScissor=(%d,%d,%d,%d) adj=%d projType=%d vp=(%d,%d,%d,%d) wideVp=%d scaleX=%f clip=(%.0f,%.0f,%.0f,%.0f)\n",
+                        fprintf(stderr, "[FBP] pr=%u pairScissor=(%d,%d,%d,%d) projScissor=(%d,%d,%d,%d) adj=%d projType=%d vp=(%d,%d,%d,%d) wideVp=%d scaleX=%f calls=%u\n",
+                            pr,
                             fbPair.scissorRect.ulx, fbPair.scissorRect.uly, fbPair.scissorRect.lrx, fbPair.scissorRect.lry,
+                            proj.scissorRect.ulx, proj.scissorRect.uly, proj.scissorRect.lrx, proj.scissorRect.lry,
                             (int)adjustRatio, (int)proj.type,
                             vr.ulx, vr.uly, vr.lrx, vr.lry,
                             (int)useWideViewport, triangles.screenScale.x,
-                            viewportClip.x, viewportClip.y, viewportClip.width, viewportClip.height);
+                            proj.gameCallCount);
                     }
                 }
             }
@@ -1713,7 +1734,45 @@ namespace RT64 {
                             break;
                         }
 
-                        triangles.scissor = convertFixedRect(call.callDesc.scissorRect, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+                        // WR64: widen inner-view-rect PER-CALL scissors here,
+                        // at GPU-scissor conversion time, instead of at the
+                        // RDP state level. Widening the state rect (see
+                        // rt64_rdp.cpp mask bit 0) changes fbPair/projection
+                        // scissor classification and knocks the world off
+                        // RT64's aspect-expansion path (the scene collapses
+                        // into an unstretched 4:3 band). Here only the final
+                        // clip widens; placement/aspect decisions are
+                        // untouched.
+                        FixedRect wr64CallScissor = call.callDesc.scissorRect;
+                        if (rt64_wr64_get_wide_world() != 0 &&
+                            (wr64CallScissor.ulx >= 16) && (wr64CallScissor.ulx <= 40) &&
+                            (wr64CallScissor.uly >= 40) && (wr64CallScissor.uly <= 88) &&
+                            (wr64CallScissor.lrx >= 1200) && (wr64CallScissor.lrx <= 1300) &&
+                            (wr64CallScissor.lry >= 856) && (wr64CallScissor.lry <= 980)) {
+                            wr64CallScissor.ulx = 0;
+                            wr64CallScissor.uly = 0;
+                            wr64CallScissor.lrx = 1280;
+                            wr64CallScissor.lry = 960;
+                        }
+                        triangles.scissor = convertFixedRect(wr64CallScissor, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
+                        // TEMP (WR64 clip hunt): dump the actual clip inputs.
+                        {
+                            static const char *wr64ClipDbg = getenv("WR64_CLIP_DEBUG");
+                            if (wr64ClipDbg && wr64ClipDbg[0] == '1' && rt64_wr64_get_wide_world() != 0) {
+                                static int clipSeen = 0;
+                                if ((clipSeen++ % 997) < 6) {
+                                    fprintf(stderr,
+                                        "[CLIP] callScissor=(%d,%d,%d,%d) org=(%u,%u) tri.scissor=(%d,%d,%d,%d) vpClip=(%.0f,%.0f,%.0f,%.0f) invScale=%f projT=%d\n",
+                                        call.callDesc.scissorRect.ulx, call.callDesc.scissorRect.uly,
+                                        call.callDesc.scissorRect.lrx, call.callDesc.scissorRect.lry,
+                                        call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin,
+                                        triangles.scissor.left, triangles.scissor.top,
+                                        triangles.scissor.right, triangles.scissor.bottom,
+                                        viewportClip.x, viewportClip.y, viewportClip.width, viewportClip.height,
+                                        invRatioScale, (int)proj.type);
+                                }
+                            }
+                        }
 
                         bool usesViewport = (proj.type == Projection::Type::Perspective) || (proj.type == Projection::Type::Orthographic);
                         if (usesViewport) {

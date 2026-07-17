@@ -937,10 +937,22 @@ namespace RT64 {
         state->updateDrawStatusAttribute(DrawAttribute::ObjRenderMode);
     }
 
+    // WR64: the game maps its 3D world into the inner view rect via the RSP
+    // viewport, set from branched sub-DLs (like the scissors — see
+    // rt64_rdp.cpp). Even with scissors widened, world content still lands
+    // inside the smaller viewport rect, leaving empty margins. This hook
+    // logs (WR64_VP_TRACE=1) and widens matching gameplay viewports to the
+    // full 320x240 framebuffer. The port enables it per gameplay frame.
+    static int wr64ViewportWiden = 0;
+
+    extern "C" void rt64_wr64_set_viewport_widen(int enable) {
+        wr64ViewportWiden = enable;
+    }
+
     void RSP::setViewport(uint32_t address) {
         setViewport(address, extended.global.viewportOrigin, extended.global.viewportOffsetX, extended.global.viewportOffsetY);
     }
-    
+
     void RSP::setViewport(uint32_t address, uint16_t ori, int16_t offx, int16_t offy) {
         const uint32_t rdramAddress = fromSegmentedMasked(address);
         const Vp_t *vp = reinterpret_cast<const Vp_t *>(state->fromRDRAM(rdramAddress));
@@ -953,6 +965,18 @@ namespace RT64 {
         viewport.translate.z = float(vp->vtrans[3]) / DepthRange;
         extended.viewportOriginStack[viewportStackSize - 1] = ori;
         viewportChanged = true;
+
+        if (wr64ViewportWiden) {
+            static const char *trace = getenv("WR64_VP_TRACE");
+            if (trace && trace[0] == '1') {
+                static uint32_t seen = 0;
+                if ((++seen % 50) == 0) {
+                    fprintf(stderr, "[VPHLE] scale=(%.1f,%.1f) trans=(%.1f,%.1f) raw=0x%08X\n",
+                        viewport.scale.x, viewport.scale.y,
+                        viewport.translate.x, viewport.translate.y, address);
+                }
+            }
+        }
     }
 
     void RSP::pushViewport() {

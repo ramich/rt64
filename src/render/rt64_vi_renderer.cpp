@@ -205,6 +205,19 @@ namespace RT64 {
             const float halfWidth = scissorHeight * (4.0f / 3.0f) * 0.5f;
             scissor.left = std::max(scissor.left, int32_t(lround(centerX - halfWidth)));
             scissor.right = std::min(scissor.right, int32_t(lround(centerX + halfWidth)));
+
+            // Overscan zoom: WR64's menus assume a TV's overscan hides the frame
+            // edges, but our exact 4:3 crop exposes parked-world content sitting
+            // in that overscan margin (e.g. the stray craft at the right edge of
+            // the 2P watercraft-select). Enlarge the blit ~8% about its center so
+            // the overscan band falls outside the scissor. Menu panels live well
+            // inside the overscan-safe area, so this doesn't clip real content.
+            const float overscan = 1.08f;
+            const float vcx = viewport.x + viewport.width * 0.5f;
+            const float vcy = viewport.y + viewport.height * 0.5f;
+            const float nw = viewport.width * overscan;
+            const float nh = viewport.height * overscan;
+            viewport = RenderViewport(vcx - nw * 0.5f, vcy - nh * 0.5f, nw, nh);
         }
         // NOTE: the 2P split-screen band blackout is applied in render() (it
         // needs two separate blits with a black mid gap), not here.

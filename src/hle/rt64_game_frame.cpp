@@ -9,6 +9,11 @@
 
 #include "xxHash/xxh3.h"
 
+// WR64 vertex-interpolation vertex-count limit (see rt64_vi_renderer.cpp):
+// returns nonzero when the WR64 threshold is active and the transform has too
+// many vertices to interpolate safely.
+extern "C" int rt64_wr64_vertex_interp_limit_hit(uint32_t vertexCount);
+
 namespace RT64 {
     // GameFrame
     
@@ -792,13 +797,36 @@ namespace RT64 {
             curVertexHash = XXH3_64bits(&curPosFloats[curVertexIndex * 3], curVertexCount * 3 * sizeof(float));
             prevVertexHash = XXH3_64bits(&prevPosFloats[prevVertexIndex * 3], prevVertexCount * 3 * sizeof(float));
 
-            if ((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) && (curVertexHash != prevVertexHash)) {
+            // WR64: when vertex interpolation is enabled via the fork hook, it
+            // carries a max-vertex-count threshold. Small CPU-animated meshes
+            // (drifting cloud/sprite quads, 4-14 verts) interpolate correctly;
+            // the wave-mesh chunks (350-870 verts) must NOT — the water grid is
+            // anchored to the camera, so its vertices are not persistent world
+            // points and interpolating them warps the wave animation.
+            if ((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) && (curVertexHash != prevVertexHash) &&
+                !rt64_wr64_vertex_interp_limit_hit(curVertexCount)) {
                 const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
                 const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
                 float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];
+                float maxDeltaSq = 0.0f;
                 for (uint32_t i = 0; i < curVertexCount; i++) {
+                    float deltaSq = 0.0f;
                     for (uint32_t j = 0; j < 3; j++) {
-                        curVelFloatsRef[i * 3 + j] = (curPosFloatsRef[i * 3 + j] - prevPosFloatsRef[i * 3 + j]);
+                        const float d = (curPosFloatsRef[i * 3 + j] - prevPosFloatsRef[i * 3 + j]);
+                        curVelFloatsRef[i * 3 + j] = d;
+                        deltaSq += d * d;
+                    }
+                    maxDeltaSq = std::max(maxDeltaSq, deltaSq);
+                }
+
+                // TEMP (WR64 vertex-interp tuning): log per-transform velocity
+                // stats so cloud vs wave-mesh transforms can be told apart.
+                static const char *wr64VtxDbg = getenv("WR64_VTXINTERP_DEBUG");
+                if (wr64VtxDbg && wr64VtxDbg[0] == '1') {
+                    static int wr64VtxDbgCount = 0;
+                    if ((wr64VtxDbgCount++ % 40) == 0) {
+                        fprintf(stderr, "[VTX] transform=%u verts=%u maxDelta=%f\n",
+                            curTransformIndex, curVertexCount, sqrtf(maxDeltaSq));
                     }
                 }
 

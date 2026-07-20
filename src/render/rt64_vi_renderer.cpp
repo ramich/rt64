@@ -42,6 +42,29 @@ static std::atomic<float> wr64SplitA1{1.0f};
 static std::atomic<float> wr64SplitB0{0.0f};
 static std::atomic<float> wr64SplitB1{0.0f};
 
+// WR64 vertex-position interpolation for CPU-animated meshes; consumed by
+// rt64_workload.cpp when building the default transform group and by
+// rt64_game_frame.cpp when computing per-vertex velocities. The value is a
+// MAX-VERTEX-COUNT threshold: 0 = off; N > 0 = interpolate only transforms
+// with <= N vertices. Small drifting quads (WR64 clouds/sprites, 4-14 verts)
+// interpolate correctly; the camera-anchored wave-mesh chunks (350-870 verts)
+// must not — their vertices are not persistent world points, so interpolating
+// them warps the wave animation (user-verified regression).
+static std::atomic<int> wr64VertexInterp{0};
+
+extern "C" void rt64_wr64_set_vertex_interp(int maxVerts) {
+    wr64VertexInterp.store(maxVerts, std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_get_vertex_interp() {
+    return wr64VertexInterp.load(std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_vertex_interp_limit_hit(uint32_t vertexCount) {
+    const int limit = wr64VertexInterp.load(std::memory_order_relaxed);
+    return (limit > 0) && (vertexCount > uint32_t(limit));
+}
+
 extern "C" void rt64_wr64_set_split_bands(float a0, float a1, float b0, float b1) {
     wr64SplitA0.store(a0, std::memory_order_relaxed);
     wr64SplitA1.store(a1, std::memory_order_relaxed);

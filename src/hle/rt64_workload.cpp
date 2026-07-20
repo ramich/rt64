@@ -4,6 +4,18 @@
 
 #include "rt64_workload.h"
 
+// WR64: opt-in vertex-position interpolation for games WITHOUT the extended
+// GBI. RT64's per-vertex velocity machinery is complete and generic (matched
+// transforms with equal vertex counts diff their positions into the velocity
+// buffer, rt64_game_frame.cpp), but the default TransformGroup gates it off
+// (vertexInterpolation = SKIP) because interpolating arbitrary regenerated
+// vertex data is unsafe as a global default. WR64's CPU-animated meshes
+// (billboard clouds, the water surface) regenerate positions per game frame
+// under static transforms, so they snap at 20 Hz while everything else
+// interpolates — enabling this makes them interpolate too. Defined in
+// rt64_vi_renderer.cpp with the other WR64 toggles.
+extern "C" int rt64_wr64_get_vertex_interp();
+
 namespace RT64 {
     // Common functions.
 
@@ -106,7 +118,14 @@ namespace RT64 {
         drawData.projTransforms.push_back(interop::float4x4::identity());
         drawData.viewProjTransforms.push_back(interop::float4x4::identity());
         drawData.worldTransforms.push_back(interop::float4x4::identity());
-        drawData.transformGroups.push_back(TransformGroup());
+        {
+            // Group 0 is the group every draw of a non-extended game uses.
+            TransformGroup defaultGroup;
+            if (rt64_wr64_get_vertex_interp() != 0) {
+                defaultGroup.vertexInterpolation = G_EX_COMPONENT_INTERPOLATE;
+            }
+            drawData.transformGroups.push_back(defaultGroup);
+        }
         drawData.worldTransformGroups.push_back(0);
         drawData.viewProjTransformGroups.push_back(0);
         drawData.worldTransformSegmentedAddresses.push_back(0);

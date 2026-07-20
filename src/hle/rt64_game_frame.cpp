@@ -13,6 +13,9 @@
 // returns nonzero when the WR64 threshold is active and the transform has too
 // many vertices to interpolate safely.
 extern "C" int rt64_wr64_vertex_interp_limit_hit(uint32_t vertexCount);
+// EXPERIMENTAL rigid-translation interpolation for large meshes (launcher
+// "Smooth Water" option; see rt64_vi_renderer.cpp).
+extern "C" int rt64_wr64_get_vertex_interp_rigid();
 
 namespace RT64 {
     // GameFrame
@@ -797,40 +800,126 @@ namespace RT64 {
             curVertexHash = XXH3_64bits(&curPosFloats[curVertexIndex * 3], curVertexCount * 3 * sizeof(float));
             prevVertexHash = XXH3_64bits(&prevPosFloats[prevVertexIndex * 3], prevVertexCount * 3 * sizeof(float));
 
+            // TEMP (WR64 wave-interpolation research): dump cur+prev vertex
+            // positions of large transforms (the wave-mesh chunks the limit
+            // excludes) so the grid's frame-to-frame structure can be analyzed
+            // offline. WR64_VTXDUMP=1; capped; CSV to wr64_vtxdump.csv in CWD.
+            {
+                static const char *wr64VtxDump = getenv("WR64_VTXDUMP");
+                if (wr64VtxDump && wr64VtxDump[0] == '1' &&
+                    rt64_wr64_vertex_interp_limit_hit(curVertexCount) && (curVertexCount == prevVertexCount)) {
+                    static FILE *dumpFile = fopen("wr64_vtxdump.csv", "wb");
+                    static int dumpCount = 0;
+                    if (dumpFile != nullptr && dumpCount < 60) {
+                        dumpCount++;
+                        const float *cp = &curPosFloats[curVertexIndex * 3];
+                        const float *pp = &prevPosFloats[prevVertexIndex * 3];
+                        for (uint32_t i = 0; i < curVertexCount; i++) {
+                            fprintf(dumpFile, "%d,%u,%u,%u,%f,%f,%f,%f,%f,%f\n",
+                                dumpCount, curTransformIndex, curVertexCount, i,
+                                cp[i * 3], cp[i * 3 + 1], cp[i * 3 + 2],
+                                pp[i * 3], pp[i * 3 + 1], pp[i * 3 + 2]);
+                        }
+                        fflush(dumpFile);
+                    }
+                }
+            }
+
             // WR64: when vertex interpolation is enabled via the fork hook, it
             // carries a max-vertex-count threshold. Small CPU-animated meshes
-            // (drifting cloud/sprite quads, 4-14 verts) interpolate correctly;
-            // the wave-mesh chunks (350-870 verts) must NOT — the water grid is
-            // anchored to the camera, so its vertices are not persistent world
-            // points and interpolating them warps the wave animation.
-            if ((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) && (curVertexHash != prevVertexHash) &&
-                !rt64_wr64_vertex_interp_limit_hit(curVertexCount)) {
-                const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
-                const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
-                float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];
-                float maxDeltaSq = 0.0f;
-                for (uint32_t i = 0; i < curVertexCount; i++) {
-                    float deltaSq = 0.0f;
-                    for (uint32_t j = 0; j < 3; j++) {
-                        const float d = (curPosFloatsRef[i * 3 + j] - prevPosFloatsRef[i * 3 + j]);
-                        curVelFloatsRef[i * 3 + j] = d;
-                        deltaSq += d * d;
+            // (drifting cloud/sprite quads, 4-14 verts) always interpolate.
+            // LARGE meshes (the wave-mesh chunks, 350-870 verts) interpolate
+            // only when the frame pair is RIGID in XZ: measured dumps show the
+            // wave grid translates rigidly with the craft (every vertex shares
+            // the same integer XZ delta) while only Y animates (the waves) —
+            // ideal for interpolation. The rigidity check rejects wrong
+            // transform pairings (the game's wave passes have identical static
+            // matrices, so similarity matching can cross-pair different
+            // meshes, which is what originally warped the water); rejected
+            // pairs snap like before. EXPERIMENTAL and off by default (the
+            // motion still doesn't read right in-game) — enabled via
+            // rt64_wr64_set_vertex_interp_rigid (launcher "Smooth Water").
+            if ((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) && (curVertexHash != prevVertexHash)) {
+                const bool wr64RigidEnabled = (rt64_wr64_get_vertex_interp_rigid() != 0);
+                const bool wr64Limited = rt64_wr64_vertex_interp_limit_hit(curVertexCount);
+                const bool computeVelocity = !wr64Limited || wr64RigidEnabled;
+                if (computeVelocity) {
+                    const float *curPosFloatsRef = &curPosFloats[curVertexIndex * 3];
+                    const float *prevPosFloatsRef = &prevPosFloats[prevVertexIndex * 3];
+                    float *curVelFloatsRef = &curVelFloats[curVertexIndex * 3];
+                    float maxDeltaSq = 0.0f;
+                    for (uint32_t i = 0; i < curVertexCount; i++) {
+                        float deltaSq = 0.0f;
+                        for (uint32_t j = 0; j < 3; j++) {
+                            const float d = (curPosFloatsRef[i * 3 + j] - prevPosFloatsRef[i * 3 + j]);
+                            curVelFloatsRef[i * 3 + j] = d;
+                            deltaSq += d * d;
+                        }
+                        maxDeltaSq = std::max(maxDeltaSq, deltaSq);
                     }
-                    maxDeltaSq = std::max(maxDeltaSq, deltaSq);
-                }
 
-                // TEMP (WR64 vertex-interp tuning): log per-transform velocity
-                // stats so cloud vs wave-mesh transforms can be told apart.
-                static const char *wr64VtxDbg = getenv("WR64_VTXINTERP_DEBUG");
-                if (wr64VtxDbg && wr64VtxDbg[0] == '1') {
-                    static int wr64VtxDbgCount = 0;
-                    if ((wr64VtxDbgCount++ % 40) == 0) {
-                        fprintf(stderr, "[VTX] transform=%u verts=%u maxDelta=%f\n",
-                            curTransformIndex, curVertexCount, sqrtf(maxDeltaSq));
+                    bool accept = true;
+                    if (wr64Limited) {
+                        // Rigidity check: median XZ delta, then the fraction of
+                        // vertices within tolerance of it. Strict — any camera
+                        // rotation makes the XZ deltas vary across the mesh, and
+                        // partially-accepted rotation frames visibly warp the
+                        // water, so those snap instead.
+                        thread_local std::vector<float> dxs, dzs;
+                        dxs.resize(curVertexCount);
+                        dzs.resize(curVertexCount);
+                        for (uint32_t i = 0; i < curVertexCount; i++) {
+                            dxs[i] = curVelFloatsRef[i * 3 + 0];
+                            dzs[i] = curVelFloatsRef[i * 3 + 2];
+                        }
+                        auto median = [](std::vector<float> &v) {
+                            std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+                            return v[v.size() / 2];
+                        };
+                        // median() reorders; sample tolerance against copies of
+                        // the untouched velocity buffer instead.
+                        const float medX = median(dxs);
+                        const float medZ = median(dzs);
+                        const float Tolerance = 1.0f;
+                        uint32_t matching = 0;
+                        for (uint32_t i = 0; i < curVertexCount; i++) {
+                            if (fabsf(curVelFloatsRef[i * 3 + 0] - medX) <= Tolerance &&
+                                fabsf(curVelFloatsRef[i * 3 + 2] - medZ) <= Tolerance) {
+                                matching++;
+                            }
+                        }
+                        accept = (matching * 100 >= curVertexCount * 98);
+                        if (accept) {
+                            // Clean the velocities to the ideal rigid model:
+                            // uniform median XZ translation + per-vertex Y morph
+                            // (the wave animation). Zeroing the XZ residuals
+                            // kills quantization jitter that otherwise shimmers
+                            // the mesh.
+                            for (uint32_t i = 0; i < curVertexCount; i++) {
+                                curVelFloatsRef[i * 3 + 0] = medX;
+                                curVelFloatsRef[i * 3 + 2] = medZ;
+                            }
+                        }
+                        else {
+                            memset(curVelFloatsRef, 0, curVertexCount * 3 * sizeof(float));
+                        }
+                    }
+
+                    // TEMP (WR64 vertex-interp tuning): log per-transform stats.
+                    static const char *wr64VtxDbg = getenv("WR64_VTXINTERP_DEBUG");
+                    if (wr64VtxDbg && wr64VtxDbg[0] == '1') {
+                        static int wr64VtxDbgCount = 0;
+                        if ((wr64VtxDbgCount++ % 40) == 0) {
+                            fprintf(stderr, "[VTX] transform=%u verts=%u maxDelta=%f large=%d accept=%d\n",
+                                curTransformIndex, curVertexCount, sqrtf(maxDeltaSq),
+                                (int)wr64Limited, (int)accept);
+                        }
+                    }
+
+                    if (accept) {
+                        modifiedBuffers.positionVelocity = true;
                     }
                 }
-
-                modifiedBuffers.positionVelocity = true;
             }
         }
 

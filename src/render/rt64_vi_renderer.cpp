@@ -65,6 +65,19 @@ extern "C" int rt64_wr64_vertex_interp_limit_hit(uint32_t vertexCount) {
     return (limit > 0) && (vertexCount > uint32_t(limit));
 }
 
+// EXPERIMENTAL: rigid-translation interpolation for large meshes (the wave
+// grid). Off by default — the wave motion still doesn't read right in game
+// (user-tested); exposed as a launcher option while it bakes.
+static std::atomic<int> wr64VertexInterpRigid{0};
+
+extern "C" void rt64_wr64_set_vertex_interp_rigid(int enabled) {
+    wr64VertexInterpRigid.store(enabled, std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_get_vertex_interp_rigid() {
+    return wr64VertexInterpRigid.load(std::memory_order_relaxed);
+}
+
 extern "C" void rt64_wr64_set_split_bands(float a0, float a1, float b0, float b1) {
     wr64SplitA0.store(a0, std::memory_order_relaxed);
     wr64SplitA1.store(a1, std::memory_order_relaxed);

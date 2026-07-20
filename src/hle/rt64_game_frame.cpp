@@ -348,7 +348,20 @@ namespace RT64 {
                     const Projection &prevProj = prevFbPair.projections[prevFirstProj.projectionIndex];
                     const hlslpp::float4x4 &prevViewTransform = prevWorkload.drawData.viewTransforms[prevProj.transformsIndex];
                     const hlslpp::float4x4 &prevProjTransform = prevWorkload.drawData.projTransforms[prevProj.transformsIndex];
-                    matchCandidates.emplace_back(i, j, matrixDifference(curViewTransform, prevViewTransform) + matrixDifference(curProjTransform, prevProjTransform));
+                    float sceneDiff = matrixDifference(curViewTransform, prevViewTransform) + matrixDifference(curProjTransform, prevProjTransform);
+                    // WR64 2P split-screen: prefer ORDER-consistent scene pairing
+                    // (top<->top, bottom<->bottom) when camera differences are
+                    // close. The two halves' cameras are nearly identical during
+                    // the pre-race flyby, so pure difference-based matching can
+                    // cross-pair them on numeric noise — interpolating transforms
+                    // across the two views, which mangles the rival rider models
+                    // (the "lower-half ghosting"). Scene build order follows the
+                    // game's fixed draw order, so index bias is stable; genuinely
+                    // different cameras still out-rank the bias.
+                    if (i != j) {
+                        sceneDiff = sceneDiff * 1.25f + 1e-5f;
+                    }
+                    matchCandidates.emplace_back(i, j, sceneDiff);
                 }
             }
 
@@ -356,19 +369,58 @@ namespace RT64 {
             prevScenesMatched.clear();
             curScenesMatched.resize(curScenes.size());
             prevScenesMatched.resize(prevScenes.size());
-            std::stable_sort(matchCandidates.begin(), matchCandidates.end());
-            for (const MatchCandidate &candidate : matchCandidates) {
-                if (curScenesMatched[candidate.curIndex]) {
-                    continue;
+            static const char *wr64MatchDbg = getenv("WR64_MATCH_DEBUG");
+            const bool wr64LogMatch = (wr64MatchDbg != nullptr) && (wr64MatchDbg[0] == '1') && (curScenes.size() >= 2);
+            // WR64: when the scene counts are equal, pair scenes BY ORDER
+            // instead of by matrix similarity. WR64 builds its scenes in a
+            // fixed draw order every frame, so index pairing is exact. The
+            // similarity matcher provably CANNOT handle the 2P pre-race flyby:
+            // both halves' cameras traverse the same path offset in time, so
+            // the trailing camera's current matrix is closer to the LEADING
+            // camera's previous matrix than to its own (measured: cross-pair
+            // diff ~130-270 vs correct ~313) — greedy cross-pairs them and the
+            // displaced scene interpolates between wildly different cameras
+            // (diff 540-780), the "lower-half ghosting". Falls back to greedy
+            // similarity matching when counts differ (scene sets in flux).
+            if (curScenes.size() == prevScenes.size()) {
+                for (uint32_t i = 0; i < curScenes.size(); i++) {
+                    if (wr64LogMatch) {
+                        fprintf(stderr, "[MATCH] scenes cur=%u prev=%u pair (%u<-%u) by-order\n",
+                            (uint32_t)curScenes.size(), (uint32_t)prevScenes.size(), i, i);
+                    }
+                    matchScene(workloadQueue, prevFrame, curScenes[i], prevScenes[i], workloadsModified, tileInterpolationUsed, lookAtInterpolationUsed);
+                    curScenesMatched[i] = true;
+                    prevScenesMatched[i] = true;
                 }
+            }
+            else {
+                std::stable_sort(matchCandidates.begin(), matchCandidates.end());
+                for (const MatchCandidate &candidate : matchCandidates) {
+                    if (curScenesMatched[candidate.curIndex]) {
+                        continue;
+                    }
 
-                if (prevScenesMatched[candidate.prevIndex]) {
-                    continue;
+                    if (prevScenesMatched[candidate.prevIndex]) {
+                        continue;
+                    }
+
+                    if (wr64LogMatch) {
+                        fprintf(stderr, "[MATCH] scenes cur=%u prev=%u pair (%u<-%u) diff=%f\n",
+                            (uint32_t)curScenes.size(), (uint32_t)prevScenes.size(),
+                            candidate.curIndex, candidate.prevIndex, candidate.difference);
+                    }
+                    matchScene(workloadQueue, prevFrame, curScenes[candidate.curIndex], prevScenes[candidate.prevIndex], workloadsModified, tileInterpolationUsed, lookAtInterpolationUsed);
+                    curScenesMatched[candidate.curIndex] = true;
+                    prevScenesMatched[candidate.prevIndex] = true;
                 }
-
-                matchScene(workloadQueue, prevFrame, curScenes[candidate.curIndex], prevScenes[candidate.prevIndex], workloadsModified, tileInterpolationUsed, lookAtInterpolationUsed);
-                curScenesMatched[candidate.curIndex] = true;
-                prevScenesMatched[candidate.prevIndex] = true;
+            }
+            if (wr64LogMatch) {
+                for (uint32_t i = 0; i < curScenes.size(); i++) {
+                    if (!curScenesMatched[i]) {
+                        fprintf(stderr, "[MATCH] cur scene %u UNMATCHED (of %u; prev had %u)\n",
+                            i, (uint32_t)curScenes.size(), (uint32_t)prevScenes.size());
+                    }
+                }
             }
         };
 

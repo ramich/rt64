@@ -21,6 +21,23 @@
 extern "C" int rt64_wr64_get_present_crop43();
 extern "C" int rt64_wr64_get_wide_world();
 
+// WR64 2P split-screen detection for the gutter blackout: this renderer counts
+// how many times the TOP split half has been drawn and records the border-inset
+// fraction. The port polls the counter each game frame (like the world/menu
+// projection counters) and sets the persistent gutter accordingly, so the VI
+// present blacks out the top/bottom border bands on every frame (see
+// rt64_vi_renderer.cpp) — robust to interpolated presents.
+static std::atomic<uint32_t> wr64SplitHalfDraws{0};
+static std::atomic<float> wr64SplitBandA0{0.05f};  // top half   [start,
+static std::atomic<float> wr64SplitBandA1{0.5f};   //             end]
+static std::atomic<float> wr64SplitBandB0{0.508f}; // bottom half [start,
+static std::atomic<float> wr64SplitBandB1{0.954f}; //             end]
+extern "C" uint32_t rt64_wr64_split_half_draws() { return wr64SplitHalfDraws.load(std::memory_order_relaxed); }
+extern "C" float rt64_wr64_split_band_a0() { return wr64SplitBandA0.load(std::memory_order_relaxed); }
+extern "C" float rt64_wr64_split_band_a1() { return wr64SplitBandA1.load(std::memory_order_relaxed); }
+extern "C" float rt64_wr64_split_band_b0() { return wr64SplitBandB0.load(std::memory_order_relaxed); }
+extern "C" float rt64_wr64_split_band_b1() { return wr64SplitBandB1.load(std::memory_order_relaxed); }
+
 // TODO: Move to shared.
 
 namespace interop {
@@ -1512,13 +1529,55 @@ namespace RT64 {
                 // band). When the port has wide-world mode on, qualify
                 // gameplay perspective projections by their SCISSOR coverage
                 // alone, ignoring the bobbing viewport.
+                // WR64 2P split-screen: each half is a full-WIDTH, HALF-HEIGHT
+                // perspective viewport inset by the game's ~32px side border.
+                // In 2P the fbPair scissor is the FULL frame while the halves
+                // are inset, so the exact full-width test rejects them and they
+                // never widen (the race stays 4:3 with flickering margins).
+                // Detect a split half — clearly less than full height AND
+                // near-full-width (border tolerance) — and widen it too.
+                // Full-height 1P projections don't match wr64SplitHalf, so they
+                // keep the exact test and are unaffected.
+                const int32_t wr64PairW = fbPair.scissorRect.lrx - fbPair.scissorRect.ulx;
+                const int32_t wr64PairH = fbPair.scissorRect.lry - fbPair.scissorRect.uly;
+                const int32_t wr64ProjH = proj.scissorRect.lry - proj.scissorRect.uly;
+                const int32_t wr64ProjTop = proj.scissorRect.uly - fbPair.scissorRect.uly;
+                const int32_t wr64WidthTol = wr64PairW / 12;
+                // A genuine 2P split half: near-full-width, height in a tight
+                // band around HALF the frame, and flush to top or starting near
+                // mid (a stacked half, not a centered banner or full view). Kept
+                // in sync with rt64_projection_processor.cpp.
+                const bool wr64SplitHalf =
+                    (wr64PairH > 0) && (wr64ProjH > 0) &&
+                    (wr64ProjH * 100 >= wr64PairH * 38) && (wr64ProjH * 100 <= wr64PairH * 55) &&
+                    ((wr64ProjTop <= wr64PairH / 10) ||
+                     (wr64ProjTop * 100 >= wr64PairH * 40 && wr64ProjTop * 100 <= wr64PairH * 55)) &&
+                    (proj.scissorRect.ulx <= fbPair.scissorRect.ulx + wr64WidthTol) &&
+                    (proj.scissorRect.lrx >= fbPair.scissorRect.lrx - wr64WidthTol);
                 if (rt64_wr64_get_wide_world() != 0 &&
                     (proj.type == Projection::Type::Perspective) &&
                     (viewportOrigin == G_EX_ORIGIN_NONE) &&
                     !proj.scissorRect.isNull() &&
-                    (proj.scissorRect.ulx <= fbPair.scissorRect.ulx) &&
-                    (proj.scissorRect.lrx >= fbPair.scissorRect.lrx)) {
+                    (((proj.scissorRect.ulx <= fbPair.scissorRect.ulx) &&
+                      (proj.scissorRect.lrx >= fbPair.scissorRect.lrx)) ||
+                     wr64SplitHalf)) {
                     useWideViewport = true;
+                }
+                // Record each split half's play band [top,bottom] as fractions
+                // of the frame, so the port can drive the persistent present
+                // band-blackout (top/mid/bottom gutters black). Bump the counter
+                // on the top half so the port knows split-screen is active.
+                if (wr64SplitHalf && (rt64_wr64_get_present_crop43() == 0) && (wr64PairH > 0)) {
+                    const float f0 = float(wr64ProjTop) / float(wr64PairH);
+                    const float f1 = float(wr64ProjTop + wr64ProjH) / float(wr64PairH);
+                    if (wr64ProjTop <= wr64PairH / 10) {         // top half (flush to top)
+                        wr64SplitBandA0.store(f0, std::memory_order_relaxed);
+                        wr64SplitBandA1.store(f1, std::memory_order_relaxed);
+                        wr64SplitHalfDraws.fetch_add(1, std::memory_order_relaxed);
+                    } else {                                     // bottom half (starts ~mid)
+                        wr64SplitBandB0.store(f0, std::memory_order_relaxed);
+                        wr64SplitBandB1.store(f1, std::memory_order_relaxed);
+                    }
                 }
                 // WR64: while the present blit is cropped to 4:3, nothing may
                 // take the widened-viewport path — WR64's menus draw their
@@ -1756,8 +1815,23 @@ namespace RT64 {
                         }
                         triangles.scissor = convertFixedRect(wr64CallScissor, p.resolutionScale, p.fbWidth, invRatioScale, extOriginPercentage, int32_t(horizontalMisalignment), call.callDesc.scissorLeftOrigin, call.callDesc.scissorRightOrigin);
                         // TEMP (WR64 clip hunt): dump the actual clip inputs.
+                        // WR64_CLIP_DEBUG=2 logs EVERY call whose original
+                        // scissor was the inner view rect (ulx 10.2 == 32),
+                        // regardless of sampling.
                         {
                             static const char *wr64ClipDbg = getenv("WR64_CLIP_DEBUG");
+                            static int clipSeen2 = 0;
+                            if (wr64ClipDbg && wr64ClipDbg[0] == '2' && rt64_wr64_get_wide_world() != 0 &&
+                                call.callDesc.scissorRect.ulx == 32 && (clipSeen2++ % 50) == 0) {
+                                fprintf(stderr,
+                                    "[CLIP2] callScissor=(%d,%d,%d,%d) widened->(%d,%d,%d,%d) tri.scissor=(%d,%d,%d,%d) invScale=%f projT=%d wide=%d\n",
+                                    call.callDesc.scissorRect.ulx, call.callDesc.scissorRect.uly,
+                                    call.callDesc.scissorRect.lrx, call.callDesc.scissorRect.lry,
+                                    wr64CallScissor.ulx, wr64CallScissor.uly, wr64CallScissor.lrx, wr64CallScissor.lry,
+                                    triangles.scissor.left, triangles.scissor.top,
+                                    triangles.scissor.right, triangles.scissor.bottom,
+                                    invRatioScale, (int)proj.type, rt64_wr64_get_wide_world());
+                            }
                             if (wr64ClipDbg && wr64ClipDbg[0] == '1' && rt64_wr64_get_wide_world() != 0) {
                                 static int clipSeen = 0;
                                 if ((clipSeen++ % 997) < 6) {

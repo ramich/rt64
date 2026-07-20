@@ -27,6 +27,28 @@ extern "C" int rt64_wr64_get_present_crop43() {
     return wr64PresentCrop43.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+// WR64 2P split-screen band blackout: the two half-viewports are inset by the
+// game's ~5% top/bottom border AND separated by a small mid gutter, and shared
+// full-frame passes (start gate, countdown, water) spill into all three border
+// bands (above the top half, between the halves, below the bottom half). The
+// present blits ONLY the two play bands [a0,a1] and [b0,b1] (fractions of the
+// scissor height), leaving the top/mid/bottom bands as the pre-cleared black
+// swap chain. Persistent state (like the crop flag) so EVERY present --
+// including interpolated frames above the 20 Hz game rate -- applies it, with
+// no flicker; the port sets it each game frame and clears it otherwise.
+// Default (a0=0,a1=1,b1<=b0) = a single full-height band = ordinary present.
+static std::atomic<float> wr64SplitA0{0.0f};
+static std::atomic<float> wr64SplitA1{1.0f};
+static std::atomic<float> wr64SplitB0{0.0f};
+static std::atomic<float> wr64SplitB1{0.0f};
+
+extern "C" void rt64_wr64_set_split_bands(float a0, float a1, float b0, float b1) {
+    wr64SplitA0.store(a0, std::memory_order_relaxed);
+    wr64SplitA1.store(a1, std::memory_order_relaxed);
+    wr64SplitB0.store(b0, std::memory_order_relaxed);
+    wr64SplitB1.store(b1, std::memory_order_relaxed);
+}
+
 // WR64 wide-world mode: while enabled (gameplay frames with border removal
 // active), perspective projections whose scissor covers the framebuffer-pair
 // scissor take the wide-viewport path even when the game's camera-bob
@@ -106,7 +128,6 @@ namespace RT64 {
         RenderRect scissor;
         getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
         p.commandList->setViewports(viewport);
-        p.commandList->setScissors(scissor);
 
         interop::VideoInterfaceCB pushConstants;
         pushConstants.videoResolution = computeHDSize(hlslpp::float2(p.vi->fbSize()), p.resolutionScale, p.downsamplingScale);
@@ -118,7 +139,28 @@ namespace RT64 {
         p.commandList->setGraphicsDescriptorSet(descriptorSet->get(), 0);
         p.commandList->setGraphicsPushConstants(0, &pushConstants);
         p.commandList->setVertexBuffers(0, nullptr, 0, nullptr);
-        p.commandList->drawInstanced(3, 1, 0, 0);
+
+        // WR64 2P split-screen: blit only the two play bands, leaving the
+        // top/mid/bottom border gutters black (see the setter above). Default
+        // state is a single full band [0,1] = ordinary present.
+        const float a0 = wr64SplitA0.load(std::memory_order_relaxed);
+        const float a1 = wr64SplitA1.load(std::memory_order_relaxed);
+        const float b0 = wr64SplitB0.load(std::memory_order_relaxed);
+        const float b1 = wr64SplitB1.load(std::memory_order_relaxed);
+        const int32_t sTop = scissor.top;
+        const int32_t sH = scissor.bottom - scissor.top;
+        auto blitBand = [&](float f0, float f1) {
+            RenderRect band = scissor;
+            band.top = std::max(scissor.top, sTop + int32_t(lround(f0 * sH)));
+            band.bottom = std::min(scissor.bottom, sTop + int32_t(lround(f1 * sH)));
+            if (band.bottom <= band.top) return;
+            p.commandList->setScissors(band);
+            p.commandList->drawInstanced(3, 1, 0, 0);
+        };
+        blitBand(a0, a1);
+        if (b1 > b0) {
+            blitBand(b0, b1);
+        }
     }
 
     void VIRenderer::getViewportAndScissor(const RenderSwapChain *swapChain, const VI &vi, hlslpp::float2 resolutionScale, uint32_t downsamplingScale, bool removeBlackBorders, RenderViewport &viewport, RenderRect &scissor) {
@@ -164,5 +206,7 @@ namespace RT64 {
             scissor.left = std::max(scissor.left, int32_t(lround(centerX - halfWidth)));
             scissor.right = std::min(scissor.right, int32_t(lround(centerX + halfWidth)));
         }
+        // NOTE: the 2P split-screen band blackout is applied in render() (it
+        // needs two separate blits with a black mid gap), not here.
     }
 };

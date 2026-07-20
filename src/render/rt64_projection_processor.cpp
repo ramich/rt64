@@ -7,6 +7,11 @@
 #include "common/rt64_math.h"
 #include "hle/rt64_workload_queue.h"
 
+// WR64: present-crop flag — set while a 4:3 menu is being pillarboxed. The
+// split-screen FOV correction below must NOT run for menus (they are cropped),
+// only for live gameplay (2P race, uncropped), or it distorts menu/2D layout.
+extern "C" int rt64_wr64_get_present_crop43();
+
 namespace RT64 {
     inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
         matrix[0][0] *= aspectRatioScale;
@@ -111,6 +116,43 @@ namespace RT64 {
             }
 
             float projRatioScale = adjustAspectRatio ? (1.0f / p.aspectRatioScale) : 1.0f;
+            // WR64 2P split-screen: each half is a half-height, full-width
+            // perspective viewport inset by the game's ~32px border, so the
+            // stock coversWholeWidth gate above rejects it and it gets NO
+            // horizontal-FOV widening -> the 4:3 world is stretched to fill the
+            // wide half (fat riders). Give it the same widening a 1P full-frame
+            // view gets (see below). Gated tightly so it only fires for live
+            // gameplay (never menus, which are pillarboxed) and only for a
+            // genuine stacked split half: near-full-width, height in a tight
+            // band around HALF the frame, and flush to top or starting near
+            // mid-frame (not a centered banner). Full-height 1P views never
+            // match and are unaffected. Kept in sync with
+            // rt64_framebuffer_renderer.cpp.
+            if ((proj.type == Projection::Type::Perspective) && !proj.scissorRect.isNull() &&
+                (rt64_wr64_get_present_crop43() == 0)) {
+                const int32_t wr64PairW = fbPair.scissorRect.lrx - fbPair.scissorRect.ulx;
+                const int32_t wr64PairH = fbPair.scissorRect.lry - fbPair.scissorRect.uly;
+                const int32_t wr64ProjH = proj.scissorRect.lry - proj.scissorRect.uly;
+                const int32_t wr64ProjTop = proj.scissorRect.uly - fbPair.scissorRect.uly;
+                const int32_t wr64Tol = wr64PairW / 12;
+                const bool wr64NearFullWidth =
+                    (proj.scissorRect.ulx <= fbPair.scissorRect.ulx + wr64Tol) &&
+                    (proj.scissorRect.lrx >= fbPair.scissorRect.lrx - wr64Tol);
+                const bool wr64HalfHeight = (wr64PairH > 0) && (wr64ProjH > 0) &&
+                    (wr64ProjH * 100 >= wr64PairH * 38) && (wr64ProjH * 100 <= wr64PairH * 55);
+                const bool wr64TopOrMid = (wr64ProjTop <= wr64PairH / 10) ||   // flush to top
+                    (wr64ProjTop * 100 >= wr64PairH * 40 && wr64ProjTop * 100 <= wr64PairH * 55); // starts ~mid
+                if (wr64NearFullWidth && wr64HalfHeight && wr64TopOrMid) {
+                    // Give the split half the SAME horizontal-FOV widening as a
+                    // 1P full-frame view. (The stock coversWholeWidth gate denies
+                    // it because the half is border-inset, leaving it un-widened
+                    // and stretched fat.) No extra half-boost: the game already
+                    // compensates its split-screen vertical FOV, so an extra
+                    // projH/pairH factor over-widens (thin/stretched riders,
+                    // verified via an empirical sweep 2026-07-20).
+                    projRatioScale = 1.0f / p.aspectRatioScale;
+                }
+            }
             interop::float4x4 &viewMatrix = drawData.modViewTransforms[proj.transformsIndex];
             interop::float4x4 &projMatrix = drawData.modProjTransforms[proj.transformsIndex];
             interop::float4x4 &viewProjMatrix = drawData.modViewProjTransforms[proj.transformsIndex];

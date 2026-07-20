@@ -115,6 +115,19 @@ namespace RT64 {
                 adjustAspectRatio = false;
             }
 
+            // WR64: while the present is cropped to 4:3 (menu presentation),
+            // perspective projections must NOT be FOV-widened. The framebuffer
+            // renderer forces everything onto the squeezed path while cropped
+            // (screenScale.x = 1/aspectRatioScale places content at its 4:3
+            // positions), so a widened matrix gets squeezed TWICE — the
+            // watercraft-select preview craft rendered 1/ars too narrow
+            // (measured 0.56x at a 2.4:1 window, exactly 1/1.8). With the
+            // matrix untouched, the single squeeze is the correct placement.
+            if ((proj.type == Projection::Type::Perspective) &&
+                (rt64_wr64_get_present_crop43() != 0)) {
+                adjustAspectRatio = false;
+            }
+
             float projRatioScale = adjustAspectRatio ? (1.0f / p.aspectRatioScale) : 1.0f;
             // WR64 2P split-screen: each half is a half-height, full-width
             // perspective viewport inset by the game's ~32px border, so the

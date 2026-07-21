@@ -11,6 +11,14 @@
 // split-screen FOV correction below must NOT run for menus (they are cropped),
 // only for live gameplay (2P race, uncropped), or it distorts menu/2D layout.
 extern "C" int rt64_wr64_get_present_crop43();
+// WR64 overscan crop compensations (see rt64_vi_renderer.cpp): the present
+// scale-up stretches the image by 1/scale per axis; multiplying the
+// projection's Y (and X) column by the scale keeps the 3D world's proportions
+// and coverage identical to the un-cropped presentation.
+extern "C" float rt64_wr64_get_overscan_yscale();
+extern "C" float rt64_wr64_get_overscan_xscale();
+// Per-half vertical compensation for the 2P split-screen band remap.
+extern "C" float rt64_wr64_split_yscale(int isTopHalf);
 
 namespace RT64 {
     inline void adjustProjectionMatrix(interop::float4x4 &matrix, const float aspectRatioScale) {
@@ -18,6 +26,15 @@ namespace RT64 {
         matrix[1][0] *= aspectRatioScale;
         matrix[2][0] *= aspectRatioScale;
         matrix[3][0] *= aspectRatioScale;
+    }
+
+    // WR64 overscan crop: pre-compress the projection vertically by exactly the
+    // present stage's vertical stretch (see rt64_vi_renderer.cpp).
+    inline void wr64AdjustProjectionMatrixY(interop::float4x4 &matrix, const float yScale) {
+        matrix[0][1] *= yScale;
+        matrix[1][1] *= yScale;
+        matrix[2][1] *= yScale;
+        matrix[3][1] *= yScale;
     }
     
     // ProjectionProcessor
@@ -129,6 +146,8 @@ namespace RT64 {
             }
 
             float projRatioScale = adjustAspectRatio ? (1.0f / p.aspectRatioScale) : 1.0f;
+            bool wr64IsSplitHalf = false;
+            bool wr64IsTopHalf = false;
             // WR64 2P split-screen: each half is a half-height, full-width
             // perspective viewport inset by the game's ~32px border, so the
             // stock coversWholeWidth gate above rejects it and it gets NO
@@ -164,6 +183,8 @@ namespace RT64 {
                     // projH/pairH factor over-widens (thin/stretched riders,
                     // verified via an empirical sweep 2026-07-20).
                     projRatioScale = 1.0f / p.aspectRatioScale;
+                    wr64IsSplitHalf = true;
+                    wr64IsTopHalf = (wr64ProjTop <= wr64PairH / 10);
                 }
             }
             interop::float4x4 &viewMatrix = drawData.modViewTransforms[proj.transformsIndex];
@@ -181,6 +202,26 @@ namespace RT64 {
 
             adjustProjectionMatrix(projMatrix, projRatioScale);
 
+            // WR64 overscan crop: compensate the present's scale-up so the 3D
+            // world keeps its proportions and coverage in both axes. Applies
+            // only to perspective projections in live gameplay (the port clears
+            // overscan for menus; 2D/HUD stays screen-space and gets the
+            // authentic TV framing). In 2P split-screen the vertical factor is
+            // the per-half band remap instead (the port sets only the
+            // horizontal insets there).
+            const bool wr64OverscanApplies =
+                (proj.type == Projection::Type::Perspective) && (rt64_wr64_get_present_crop43() == 0);
+            const float wr64OverscanYScale = !wr64OverscanApplies ? 1.0f
+                : (wr64IsSplitHalf ? rt64_wr64_split_yscale(wr64IsTopHalf ? 1 : 0)
+                                   : rt64_wr64_get_overscan_yscale());
+            const float wr64OverscanXScale = wr64OverscanApplies ? rt64_wr64_get_overscan_xscale() : 1.0f;
+            if (wr64OverscanYScale != 1.0f) {
+                wr64AdjustProjectionMatrixY(projMatrix, wr64OverscanYScale);
+            }
+            if (wr64OverscanXScale != 1.0f) {
+                adjustProjectionMatrix(projMatrix, wr64OverscanXScale);
+            }
+
             interop::float4x4 &prevViewTransform = drawData.prevViewTransforms[proj.transformsIndex];
             interop::float4x4 &prevProjTransform = drawData.prevProjTransforms[proj.transformsIndex];
             if ((prevProjMatrix != nullptr) && (prevViewMatrix != nullptr) && (rigidBody != nullptr)) {
@@ -188,6 +229,12 @@ namespace RT64 {
                 const interop::float4x4 curProjTransform = projMatrix;
                 interop::float4x4 adjustedPrevProj = *prevProjMatrix;
                 adjustProjectionMatrix(adjustedPrevProj, projRatioScale);
+                if (wr64OverscanYScale != 1.0f) {
+                    wr64AdjustProjectionMatrixY(adjustedPrevProj, wr64OverscanYScale);
+                }
+                if (wr64OverscanXScale != 1.0f) {
+                    adjustProjectionMatrix(adjustedPrevProj, wr64OverscanXScale);
+                }
                 viewMatrix = rigidBody->lerp(p.curFrameWeight, *prevViewMatrix, curViewTransform, true);
                 prevViewTransform = rigidBody->lerp(p.prevFrameWeight, *prevViewMatrix, curViewTransform, true);
 

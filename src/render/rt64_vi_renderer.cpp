@@ -65,6 +65,46 @@ extern "C" int rt64_wr64_vertex_interp_limit_hit(uint32_t vertexCount) {
     return (limit > 0) && (vertexCount > uint32_t(limit));
 }
 
+// WR64 overscan crop (GLideN64-style, per-edge, final present stage): map the
+// content sub-rect of the VI image onto the full previous display area — crop
+// WITH scale-up, so the TV-overscan junk rows (WR64 content rect is
+// (8,20)-(310,218) of 320x240) disappear and the game fills the window
+// instead of leaving letterbox bands. Fractions of the VI image per edge;
+// persistent (set by the port per game frame, interpolation-safe). The
+// vertical scale-up stretches the image, so the port pairs this with a
+// vertical-FOV compensation in the projection processor (see
+// rt64_wr64_get_overscan_yscale) to keep the 3D world's proportions and
+// coverage identical; 2D/HUD gets the authentic TV framing.
+static std::atomic<float> wr64OverscanL{0.0f};
+static std::atomic<float> wr64OverscanR{0.0f};
+static std::atomic<float> wr64OverscanT{0.0f};
+static std::atomic<float> wr64OverscanB{0.0f};
+
+extern "C" void rt64_wr64_set_overscan(float l, float r, float t, float b) {
+    wr64OverscanL.store(l, std::memory_order_relaxed);
+    wr64OverscanR.store(r, std::memory_order_relaxed);
+    wr64OverscanT.store(t, std::memory_order_relaxed);
+    wr64OverscanB.store(b, std::memory_order_relaxed);
+}
+
+// Render compensations for the overscan scale-up: (1 - insets), or 1 when
+// overscan is inactive. The projection processor multiplies the projection's
+// Y (and X) column by these so the world renders pre-compressed by exactly
+// the display's stretch in each axis.
+extern "C" float rt64_wr64_get_overscan_yscale() {
+    const float t = wr64OverscanT.load(std::memory_order_relaxed);
+    const float b = wr64OverscanB.load(std::memory_order_relaxed);
+    const float remain = 1.0f - t - b;
+    return (remain > 0.0f && remain < 1.0f) ? remain : 1.0f;
+}
+
+extern "C" float rt64_wr64_get_overscan_xscale() {
+    const float l = wr64OverscanL.load(std::memory_order_relaxed);
+    const float r = wr64OverscanR.load(std::memory_order_relaxed);
+    const float remain = 1.0f - l - r;
+    return (remain > 0.0f && remain < 1.0f) ? remain : 1.0f;
+}
+
 // EXPERIMENTAL: rigid-translation interpolation for large meshes (the wave
 // grid). Off by default — the wave motion still doesn't read right in game
 // (user-tested); exposed as a launcher option while it bakes.
@@ -78,11 +118,52 @@ extern "C" int rt64_wr64_get_vertex_interp_rigid() {
     return wr64VertexInterpRigid.load(std::memory_order_relaxed);
 }
 
+// Thin divider between the two remapped halves, as a fraction of the window
+// height (split across the middle).
+static constexpr float wr64SplitDivider = 0.008f;
+
+// Whether the split halves are REMAPPED to fill the window (overscan-style) or
+// presented with plain scissor bands (classic gutters). Follows the port's
+// Overscan Crop setting.
+static std::atomic<int> wr64SplitRemap{0};
+
+extern "C" void rt64_wr64_set_split_remap(int enabled) {
+    wr64SplitRemap.store(enabled, std::memory_order_relaxed);
+}
+
+// Presented-frame counter (one per VI present, i.e. including interpolated
+// frames) for the port's FPS readout — the game-frame counter only ticks at
+// the game's native ~20 Hz.
+static std::atomic<uint32_t> wr64PresentCount{0};
+
+extern "C" uint32_t rt64_wr64_consume_present_count() {
+    return wr64PresentCount.exchange(0, std::memory_order_relaxed);
+}
+
 extern "C" void rt64_wr64_set_split_bands(float a0, float a1, float b0, float b1) {
     wr64SplitA0.store(a0, std::memory_order_relaxed);
     wr64SplitA1.store(a1, std::memory_order_relaxed);
     wr64SplitB0.store(b0, std::memory_order_relaxed);
     wr64SplitB1.store(b1, std::memory_order_relaxed);
+}
+
+// Per-half vertical render compensation for the split remap: source band
+// height / destination band height (the display stretches each half by the
+// inverse). 1.0 when the split remap is inactive.
+extern "C" float rt64_wr64_split_yscale(int isTopHalf) {
+    if (wr64SplitRemap.load(std::memory_order_relaxed) == 0) {
+        return 1.0f;
+    }
+    const float b0 = wr64SplitB0.load(std::memory_order_relaxed);
+    const float b1 = wr64SplitB1.load(std::memory_order_relaxed);
+    if (b1 <= b0) {
+        return 1.0f;
+    }
+    const float a0 = wr64SplitA0.load(std::memory_order_relaxed);
+    const float a1 = wr64SplitA1.load(std::memory_order_relaxed);
+    const float srcH = isTopHalf ? (a1 - a0) : (b1 - b0);
+    const float dstH = 0.5f - wr64SplitDivider * 0.5f;
+    return (srcH > 0.0f && dstH > 0.0f) ? (srcH / dstH) : 1.0f;
 }
 
 // WR64 wide-world mode: while enabled (gameplay frames with border removal
@@ -160,6 +241,8 @@ namespace RT64 {
 
         descriptorSet->setTexture(descriptorSet->gInput, p.texture, RenderTextureLayout::SHADER_READ);
 
+        wr64PresentCount.fetch_add(1, std::memory_order_relaxed);
+
         RenderViewport viewport;
         RenderRect scissor;
         getViewportAndScissor(p.swapChain, *p.vi, p.resolutionScale, p.downsamplingScale, p.removeBlackBorders, viewport, scissor);
@@ -176,26 +259,54 @@ namespace RT64 {
         p.commandList->setGraphicsPushConstants(0, &pushConstants);
         p.commandList->setVertexBuffers(0, nullptr, 0, nullptr);
 
-        // WR64 2P split-screen: blit only the two play bands, leaving the
-        // top/mid/bottom border gutters black (see the setter above). Default
-        // state is a single full band [0,1] = ordinary present.
+        // WR64 2P split-screen: with two bands set, each half's content band is
+        // REMAPPED to fill its half of the window (overscan-style crop with
+        // scale-up: no top/bottom border gutters, just a thin divider). The
+        // projection processor compensates the per-half vertical stretch (see
+        // rt64_wr64_split_yscale) so the world keeps its proportions. With a
+        // single band, plain scissor cropping as before. Default single [0,1]
+        // band = ordinary present.
         const float a0 = wr64SplitA0.load(std::memory_order_relaxed);
         const float a1 = wr64SplitA1.load(std::memory_order_relaxed);
         const float b0 = wr64SplitB0.load(std::memory_order_relaxed);
         const float b1 = wr64SplitB1.load(std::memory_order_relaxed);
         const int32_t sTop = scissor.top;
         const int32_t sH = scissor.bottom - scissor.top;
-        auto blitBand = [&](float f0, float f1) {
-            RenderRect band = scissor;
-            band.top = std::max(scissor.top, sTop + int32_t(lround(f0 * sH)));
-            band.bottom = std::min(scissor.bottom, sTop + int32_t(lround(f1 * sH)));
-            if (band.bottom <= band.top) return;
-            p.commandList->setScissors(band);
-            p.commandList->drawInstanced(3, 1, 0, 0);
-        };
-        blitBand(a0, a1);
-        if (b1 > b0) {
-            blitBand(b0, b1);
+        if (b1 > b0 && wr64SplitRemap.load(std::memory_order_relaxed) != 0) {
+            // Two halves: source band [srcF0..srcF1] of the image maps onto
+            // destination band [dstF0..dstF1] of the scissor area.
+            auto drawHalf = [&](float srcF0, float srcF1, float dstF0, float dstF1) {
+                const float srcH = srcF1 - srcF0;
+                if (srcH <= 0.0f) return;
+                const float dstY0 = float(sTop) + dstF0 * float(sH);
+                const float dstY1 = float(sTop) + dstF1 * float(sH);
+                RenderViewport vp = viewport;
+                vp.height = (dstY1 - dstY0) / srcH;
+                vp.y = dstY0 - srcF0 * vp.height;
+                RenderRect band = scissor;
+                band.top = std::max(scissor.top, int32_t(lround(dstY0)));
+                band.bottom = std::min(scissor.bottom, int32_t(lround(dstY1)));
+                if (band.bottom <= band.top) return;
+                p.commandList->setViewports(vp);
+                p.commandList->setScissors(band);
+                p.commandList->drawInstanced(3, 1, 0, 0);
+            };
+            drawHalf(a0, a1, 0.0f, 0.5f - wr64SplitDivider * 0.5f);
+            drawHalf(b0, b1, 0.5f + wr64SplitDivider * 0.5f, 1.0f);
+        }
+        else {
+            auto blitBand = [&](float f0, float f1) {
+                RenderRect band = scissor;
+                band.top = std::max(scissor.top, sTop + int32_t(lround(f0 * sH)));
+                band.bottom = std::min(scissor.bottom, sTop + int32_t(lround(f1 * sH)));
+                if (band.bottom <= band.top) return;
+                p.commandList->setScissors(band);
+                p.commandList->drawInstanced(3, 1, 0, 0);
+            };
+            blitBand(a0, a1);
+            if (b1 > b0) {
+                blitBand(b0, b1);
+            }
         }
     }
 
@@ -254,6 +365,34 @@ namespace RT64 {
             const float nw = viewport.width * overscan;
             const float nh = viewport.height * overscan;
             viewport = RenderViewport(vcx - nw * 0.5f, vcy - nh * 0.5f, nw, nh);
+        }
+
+        // WR64 gameplay overscan crop (see the setters above): remap the
+        // viewport per axis so the inset content sub-rect of the VI image maps
+        // onto the area the full image used to occupy — crop with scale-up.
+        // The port only sets these during (non-menu, non-split) gameplay.
+        {
+            const float fl = wr64OverscanL.load(std::memory_order_relaxed);
+            const float fr = wr64OverscanR.load(std::memory_order_relaxed);
+            const float ft = wr64OverscanT.load(std::memory_order_relaxed);
+            const float fb = wr64OverscanB.load(std::memory_order_relaxed);
+            const float remainX = 1.0f - fl - fr;
+            const float remainY = 1.0f - ft - fb;
+            if ((remainX > 0.0f && remainX < 1.0f) || (remainY > 0.0f && remainY < 1.0f)) {
+                float vx = viewport.x, vy = viewport.y;
+                float vw = viewport.width, vh = viewport.height;
+                if (remainX > 0.0f && remainX < 1.0f) {
+                    const float nw2 = vw / remainX;
+                    vx = vx - fl * nw2;
+                    vw = nw2;
+                }
+                if (remainY > 0.0f && remainY < 1.0f) {
+                    const float nh2 = vh / remainY;
+                    vy = vy - ft * nh2;
+                    vh = nh2;
+                }
+                viewport = RenderViewport(vx, vy, vw, vh);
+            }
         }
         // NOTE: the 2P split-screen band blackout is applied in render() (it
         // needs two separate blits with a black mid gap), not here.

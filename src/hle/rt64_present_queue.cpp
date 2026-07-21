@@ -4,15 +4,24 @@
 
 #include "rt64_present_queue.h"
 
+#include <thread>
+#include <vector>
+
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
 #include "shared/rt64_wr64_motion_blur.h"
+#include "shared/rt64_wr64_sharpen.h"
 
 #include "rt64_workload_queue.h"
 
-// WR64 fork hook (rt64_vi_renderer.cpp): motion-blur strength for the
-// present-time accumulation prototype below.
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#include "stb/stb_image_write.h"
+
+// WR64 fork hooks (rt64_vi_renderer.cpp): motion-blur/sharpen strengths and
+// the pending-screenshot path for the present-time passes below.
 extern "C" float rt64_wr64_get_motion_blur();
+extern "C" float rt64_wr64_get_sharpen();
+bool rt64_wr64_take_screenshot_path(std::string& out);
 
 namespace RT64 {
     // PresentQueue
@@ -353,6 +362,52 @@ namespace RT64 {
                     viRenderer->render(renderParams);
                 }
 
+                // WR64 sharpen (CAS-lite): copy the freshly rendered frame to a
+                // scratch texture and draw it back through the sharpen shader.
+                // Runs before the motion blur (which then accumulates the
+                // sharpened image) and before the UI draw hook (UI unaffected).
+                {
+                    const float sharpenK = rt64_wr64_get_sharpen();
+                    const ShaderRecord &sharpenShader = ext.shaderLibrary->wr64Sharpen;
+                    if (sharpenK > 0.0f && renderParams.texture != nullptr && sharpenShader.pipeline != nullptr) {
+                        const uint32_t scWidth = ext.swapChain->getWidth();
+                        const uint32_t scHeight = ext.swapChain->getHeight();
+                        if (wr64Scratch == nullptr || wr64ScratchWidth != scWidth || wr64ScratchHeight != scHeight) {
+                            wr64Scratch = ext.device->createTexture(RenderTextureDesc::Texture2D(scWidth, scHeight, 1, RenderFormat::B8G8R8A8_UNORM));
+                            wr64ScratchDescSet = std::make_unique<TextureCopyDescriptorSet>(ext.device);
+                            wr64ScratchDescSet->setTexture(wr64ScratchDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64ScratchWidth = scWidth;
+                            wr64ScratchHeight = scHeight;
+                        }
+
+                        commandList->setFramebuffer(nullptr);
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COPY_SOURCE));
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::COPY_DEST));
+                        commandList->copyTexture(wr64Scratch.get(), swapChainTexture);
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::SHADER_READ));
+                        commandList->setFramebuffer(swapChainFramebuffer);
+
+                        commandList->setPipeline(sharpenShader.pipeline.get());
+                        commandList->setGraphicsPipelineLayout(sharpenShader.pipelineLayout.get());
+                        commandList->setGraphicsDescriptorSet(wr64ScratchDescSet->get(), 0);
+
+                        interop::WR64SharpenCB sharpenCB;
+                        sharpenCB.texSize.x = float(scWidth);
+                        sharpenCB.texSize.y = float(scHeight);
+                        sharpenCB.strength = sharpenK;
+                        sharpenCB.padding = 0.0f;
+                        commandList->setGraphicsPushConstants(0, &sharpenCB);
+
+                        const RenderViewport sharpenViewport(0.0f, 0.0f, float(scWidth), float(scHeight));
+                        const RenderRect sharpenScissor(0, 0, int32_t(scWidth), int32_t(scHeight));
+                        commandList->setViewports(sharpenViewport);
+                        commandList->setScissors(sharpenScissor);
+                        commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+                        commandList->drawInstanced(3, 1, 0, 0);
+                    }
+                }
+
                 // WR64 motion blur (prototype): exponential accumulation at
                 // present time. Draw the PREVIOUS presented frame over the
                 // current one with constant alpha = strength, then capture the
@@ -415,12 +470,40 @@ namespace RT64 {
                     drawHook(commandList, swapChainFramebuffer);
                 }
 
+                // WR64 screenshot: copy the FINAL frame (game + UI) into a
+                // readback buffer; converted + written to PNG after the fence
+                // below. Requested via rt64_wr64_request_screenshot (F12).
+                std::string wr64ShotPathTaken;
+                uint32_t wr64ShotW = 0, wr64ShotH = 0, wr64ShotPitch = 0;
+                const bool wr64TakeShot = rt64_wr64_take_screenshot_path(wr64ShotPathTaken);
+
                 {
                     const std::scoped_lock lock(inspectorMutex);
                     if (inspector != nullptr) {
                         inspector->draw(commandList);
                     }
-                    
+
+                    if (wr64TakeShot) {
+                        wr64ShotW = ext.swapChain->getWidth();
+                        wr64ShotH = ext.swapChain->getHeight();
+                        wr64ShotPitch = (wr64ShotW * 4 + 255) & ~255u;   // 256-byte aligned rows
+                        fprintf(stderr, "[WR64] screenshot: capturing %ux%u -> %s\n", wr64ShotW, wr64ShotH, wr64ShotPathTaken.c_str());
+                        wr64ShotBuffer = ext.device->createBuffer(RenderBufferDesc::ReadbackBuffer(uint64_t(wr64ShotPitch) * wr64ShotH));
+                        if (wr64ShotBuffer == nullptr) {
+                            fprintf(stderr, "[WR64] screenshot: readback buffer creation FAILED\n");
+                        }
+                        commandList->setFramebuffer(nullptr);
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COPY_SOURCE));
+                        RenderTextureCopyLocation shotDst = RenderTextureCopyLocation::PlacedFootprint(wr64ShotBuffer.get(), RenderFormat::B8G8R8A8_UNORM, wr64ShotW, wr64ShotH, 1, wr64ShotPitch / 4);
+                        // plume D3D12 quirk: copyTextureRegion calls
+                        // setSamplePositions(dst.texture), which null-derefs for
+                        // buffer destinations. The field is otherwise ignored for
+                        // placed footprints, so hand it a harmless non-MSAA
+                        // texture instead of patching the plume submodule.
+                        shotDst.texture = swapChainTexture;
+                        commandList->copyTextureRegion(shotDst, RenderTextureCopyLocation::Subresource(swapChainTexture));
+                    }
+
                     commandList->barriers(RenderBarrierStage::NONE, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::PRESENT));
                     commandList->end();
                     const RenderCommandList *commandList = ext.presentGraphicsWorker->commandList.get();
@@ -428,6 +511,37 @@ namespace RT64 {
                     RenderCommandSemaphore *signalSemaphore = drawSemaphores[swapChainIndex].get();
                     ext.presentGraphicsWorker->commandQueue->executeCommandLists(&commandList, 1, &waitSemaphore, 1, &signalSemaphore, 1, ext.presentGraphicsWorker->commandFence.get());
                     ext.presentGraphicsWorker->wait();
+                }
+
+                if (wr64TakeShot && wr64ShotBuffer != nullptr) {
+                    const uint8_t *src = reinterpret_cast<const uint8_t *>(wr64ShotBuffer->map());
+                    if (src == nullptr) {
+                        fprintf(stderr, "[WR64] screenshot: readback map FAILED\n");
+                    }
+                    if (src != nullptr) {
+                        // BGRA (swap chain) -> RGBA, dropping the row padding.
+                        std::vector<uint8_t> rgba(size_t(wr64ShotW) * wr64ShotH * 4);
+                        for (uint32_t y = 0; y < wr64ShotH; y++) {
+                            const uint8_t *row = src + size_t(y) * wr64ShotPitch;
+                            uint8_t *dst = rgba.data() + size_t(y) * wr64ShotW * 4;
+                            for (uint32_t x = 0; x < wr64ShotW; x++) {
+                                dst[x * 4 + 0] = row[x * 4 + 2];
+                                dst[x * 4 + 1] = row[x * 4 + 1];
+                                dst[x * 4 + 2] = row[x * 4 + 0];
+                                dst[x * 4 + 3] = 0xFF;
+                            }
+                        }
+                        wr64ShotBuffer->unmap();
+
+                        std::thread([path = std::move(wr64ShotPathTaken), w = wr64ShotW, h = wr64ShotH, data = std::move(rgba)]() {
+                            if (stbi_write_png(path.c_str(), int(w), int(h), 4, data.data(), int(w) * 4) != 0) {
+                                fprintf(stderr, "[WR64] screenshot saved: %s\n", path.c_str());
+                            } else {
+                                fprintf(stderr, "[WR64] screenshot FAILED to write: %s\n", path.c_str());
+                            }
+                        }).detach();
+                    }
+                    wr64ShotBuffer.reset();
                 }
             }
 

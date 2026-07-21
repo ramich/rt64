@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <atomic>
+#include <mutex>
+#include <string>
 
 #include "shared/rt64_hlsl.h"
 #include "shared/rt64_video_interface.h"
@@ -42,6 +44,41 @@ extern "C" void rt64_wr64_set_motion_blur(float strength) {
 
 extern "C" float rt64_wr64_get_motion_blur() {
     return wr64MotionBlur.load(std::memory_order_relaxed);
+}
+
+// WR64 sharpen (contrast-adaptive): strength of the present-time unsharp
+// pass, 0 = off (pass skipped entirely).
+static std::atomic<float> wr64Sharpen{0.0f};
+
+extern "C" void rt64_wr64_set_sharpen(float strength) {
+    if (!(strength >= 0.0f)) strength = 0.0f;   // also catches NaN
+    if (strength > 1.0f) strength = 1.0f;
+    wr64Sharpen.store(strength, std::memory_order_relaxed);
+}
+
+extern "C" float rt64_wr64_get_sharpen() {
+    return wr64Sharpen.load(std::memory_order_relaxed);
+}
+
+// WR64 screenshot request: the port hands a destination path; the present
+// queue consumes it on the next present (copies the final swap-chain image,
+// UI included, into a readback buffer and writes a PNG off-thread).
+static std::mutex wr64ShotMutex;
+static std::string wr64ShotPath;
+
+extern "C" void rt64_wr64_request_screenshot(const char* path) {
+    std::lock_guard<std::mutex> lk(wr64ShotMutex);
+    wr64ShotPath = (path != nullptr && path[0] != '\0') ? path : "screenshot.png";
+}
+
+bool rt64_wr64_take_screenshot_path(std::string& out) {
+    std::lock_guard<std::mutex> lk(wr64ShotMutex);
+    if (wr64ShotPath.empty()) {
+        return false;
+    }
+    out.swap(wr64ShotPath);
+    wr64ShotPath.clear();
+    return true;
 }
 
 // WR64 2P split-screen band blackout: the two half-viewports are inset by the

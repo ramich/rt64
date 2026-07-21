@@ -59,6 +59,8 @@ namespace RT64 {
         ShaderRecord videoInterfacePixel;
         // WR64 fork: present-time motion-blur compose (prev frame, alpha blend).
         ShaderRecord wr64MotionBlur;
+        // WR64 fork: contrast-adaptive sharpen at present time.
+        ShaderRecord wr64Sharpen;
 
         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
         ~ShaderLibrary();

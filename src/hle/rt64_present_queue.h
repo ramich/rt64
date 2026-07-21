@@ -49,6 +49,12 @@ namespace RT64 {
         FramebufferChangePool screenFbChangePool;
         std::atomic<bool> viewRDRAM = false;
         std::vector<std::unique_ptr<RenderFramebuffer>> swapChainFramebuffers;
+        // WR64 fork: previous presented frame for the motion-blur prototype.
+        std::unique_ptr<RenderTexture> wr64PrevFrame;
+        std::unique_ptr<TextureCopyDescriptorSet> wr64PrevFrameDescSet;
+        uint32_t wr64PrevFrameWidth = 0;
+        uint32_t wr64PrevFrameHeight = 0;
+        bool wr64PrevFrameValid = false;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;
         std::vector<std::unique_ptr<RenderCommandSemaphore>> drawSemaphores;
         std::unique_ptr<VIRenderer> viRenderer;

@@ -27,6 +27,23 @@ extern "C" int rt64_wr64_get_present_crop43() {
     return wr64PresentCrop43.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+// WR64 motion blur (prototype): exponential accumulation at present time. The
+// strength is the alpha the PREVIOUS presented frame is drawn with over the
+// current one (0 = off, ~0.5 = moderate trail, capped below 1 so it decays).
+// Consumed by the present queue after the VI blit, before the UI draw hook
+// (so menus/overlays stay sharp).
+static std::atomic<float> wr64MotionBlur{0.0f};
+
+extern "C" void rt64_wr64_set_motion_blur(float strength) {
+    if (!(strength >= 0.0f)) strength = 0.0f;   // also catches NaN
+    if (strength > 0.95f) strength = 0.95f;
+    wr64MotionBlur.store(strength, std::memory_order_relaxed);
+}
+
+extern "C" float rt64_wr64_get_motion_blur() {
+    return wr64MotionBlur.load(std::memory_order_relaxed);
+}
+
 // WR64 2P split-screen band blackout: the two half-viewports are inset by the
 // game's ~5% top/bottom border AND separated by a small mid gutter, and shared
 // full-frame passes (start gate, countdown, water) spill into all three border

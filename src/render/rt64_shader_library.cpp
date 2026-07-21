@@ -46,6 +46,7 @@
 #include "shaders/TextureResolveSamples8XPS.hlsl.spirv.h"
 #include "shaders/VideoInterfacePSRegular.hlsl.spirv.h"
 #include "shaders/VideoInterfacePSPixel.hlsl.spirv.h"
+#include "shaders/WR64MotionBlurPS.hlsl.spirv.h"
 #include "shaders/FullScreenVS.hlsl.spirv.h"
 #include "shaders/Im3DVS.hlsl.spirv.h"
 #include "shaders/ComposePS.hlsl.spirv.h"
@@ -92,6 +93,7 @@
 #   include "shaders/TextureResolveSamples8XPS.hlsl.dxil.h"
 #   include "shaders/VideoInterfacePSRegular.hlsl.dxil.h"
 #   include "shaders/VideoInterfacePSPixel.hlsl.dxil.h"
+#   include "shaders/WR64MotionBlurPS.hlsl.dxil.h"
 #   include "shaders/FullScreenVS.hlsl.dxil.h"
 #   include "shaders/Im3DVS.hlsl.dxil.h"
 #   include "shaders/ComposePS.hlsl.dxil.h"
@@ -137,6 +139,7 @@
 #   include "shaders/TextureResolveSamples8XPS.hlsl.metal.h"
 #   include "shaders/VideoInterfacePSRegular.hlsl.metal.h"
 #   include "shaders/VideoInterfacePSPixel.hlsl.metal.h"
+#   include "shaders/WR64MotionBlurPS.hlsl.metal.h"
 #   include "shaders/FullScreenVS.hlsl.metal.h"
 #   include "shaders/Im3DVS.hlsl.metal.h"
 #   include "shaders/ComposePS.hlsl.metal.h"
@@ -149,6 +152,7 @@
 #include "shared/rt64_fb_reinterpret.h"
 #include "shared/rt64_texture_copy.h"
 #include "shared/rt64_video_interface.h"
+#include "shared/rt64_wr64_motion_blur.h"
 
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_target.h"
@@ -618,6 +622,29 @@ namespace RT64 {
             pipelineDesc.pixelShader = pixelShader.get();
             pipelineDesc.pipelineLayout = videoInterfacePixel.pipelineLayout.get();
             videoInterfacePixel.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // WR64 fork: motion-blur compose. Draws the previous presented frame
+        // over the swap chain with constant alpha (push constant) — used by the
+        // present queue's accumulation-blur prototype. Same target format as
+        // the video interface pipelines (the swap chain).
+        {
+            TextureCopyDescriptorSet descriptorSet;
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::WR64MotionBlurCB), RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            wr64MotionBlur.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(WR64MotionBlurPSBlobDXIL, WR64MotionBlurPSBlobSPIRV, WR64MotionBlurPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = wr64MotionBlur.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::AlphaBlend();
+            pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // matches the swap chain (see video interface above)
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            wr64MotionBlur.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
     }
 

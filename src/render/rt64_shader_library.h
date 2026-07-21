@@ -57,6 +57,8 @@ namespace RT64 {
         ShaderRecord videoInterfaceLinear;
         ShaderRecord videoInterfaceNearest;
         ShaderRecord videoInterfacePixel;
+        // WR64 fork: present-time motion-blur compose (prev frame, alpha blend).
+        ShaderRecord wr64MotionBlur;
 
         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
         ~ShaderLibrary();

@@ -6,8 +6,13 @@
 
 #include "common/rt64_thread.h"
 #include "rhi/rt64_render_hooks.h"
+#include "shared/rt64_wr64_motion_blur.h"
 
 #include "rt64_workload_queue.h"
+
+// WR64 fork hook (rt64_vi_renderer.cpp): motion-blur strength for the
+// present-time accumulation prototype below.
+extern "C" float rt64_wr64_get_motion_blur();
 
 namespace RT64 {
     // PresentQueue
@@ -346,6 +351,63 @@ namespace RT64 {
                 if (renderParams.texture != nullptr) {
                     commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(renderParams.texture, RenderTextureLayout::SHADER_READ));
                     viRenderer->render(renderParams);
+                }
+
+                // WR64 motion blur (prototype): exponential accumulation at
+                // present time. Draw the PREVIOUS presented frame over the
+                // current one with constant alpha = strength, then capture the
+                // blended result for the next present. Runs before the UI draw
+                // hook so menus/overlays stay sharp.
+                {
+                    const float blurK = rt64_wr64_get_motion_blur();
+                    const ShaderRecord &blurShader = ext.shaderLibrary->wr64MotionBlur;
+                    if (blurK > 0.0f && renderParams.texture != nullptr && blurShader.pipeline != nullptr) {
+                        const uint32_t scWidth = ext.swapChain->getWidth();
+                        const uint32_t scHeight = ext.swapChain->getHeight();
+                        if (wr64PrevFrame == nullptr || wr64PrevFrameWidth != scWidth || wr64PrevFrameHeight != scHeight) {
+                            wr64PrevFrame = ext.device->createTexture(RenderTextureDesc::Texture2D(scWidth, scHeight, 1, RenderFormat::B8G8R8A8_UNORM));
+                            wr64PrevFrameDescSet = std::make_unique<TextureCopyDescriptorSet>(ext.device);
+                            wr64PrevFrameDescSet->setTexture(wr64PrevFrameDescSet->gInput, wr64PrevFrame.get(), RenderTextureLayout::SHADER_READ);
+                            wr64PrevFrameWidth = scWidth;
+                            wr64PrevFrameHeight = scHeight;
+                            wr64PrevFrameValid = false;
+                        }
+
+                        if (wr64PrevFrameValid) {
+                            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64PrevFrame.get(), RenderTextureLayout::SHADER_READ));
+                            commandList->setPipeline(blurShader.pipeline.get());
+                            commandList->setGraphicsPipelineLayout(blurShader.pipelineLayout.get());
+                            commandList->setGraphicsDescriptorSet(wr64PrevFrameDescSet->get(), 0);
+
+                            interop::WR64MotionBlurCB blurCB;
+                            blurCB.uvScale.x = float(scWidth);
+                            blurCB.uvScale.y = float(scHeight);
+                            blurCB.alpha = blurK;
+                            blurCB.padding = 0.0f;
+                            commandList->setGraphicsPushConstants(0, &blurCB);
+
+                            const RenderViewport blurViewport(0.0f, 0.0f, float(scWidth), float(scHeight));
+                            const RenderRect blurScissor(0, 0, int32_t(scWidth), int32_t(scHeight));
+                            commandList->setViewports(blurViewport);
+                            commandList->setScissors(blurScissor);
+                            commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+                            commandList->drawInstanced(3, 1, 0, 0);
+                        }
+
+                        // Capture the blended result for the next present.
+                        commandList->setFramebuffer(nullptr);
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COPY_SOURCE));
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(wr64PrevFrame.get(), RenderTextureLayout::COPY_DEST));
+                        commandList->copyTexture(wr64PrevFrame.get(), swapChainTexture);
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
+                        commandList->setFramebuffer(swapChainFramebuffer);
+                        wr64PrevFrameValid = true;
+                    }
+                    else {
+                        // Off (or nothing rendered): drop history so re-enabling
+                        // starts from a fresh frame.
+                        wr64PrevFrameValid = false;
+                    }
                 }
 
                 RenderHookDraw *drawHook = GetRenderHookDraw();

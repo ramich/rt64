@@ -63,6 +63,7 @@ namespace RT64 {
         ShaderRecord wr64Sharpen;
         // WR64 fork: CRT filter (Trinitron look) present pass.
         ShaderRecord wr64Crt;
+        ShaderRecord wr64Glow;
 
         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
         ~ShaderLibrary();

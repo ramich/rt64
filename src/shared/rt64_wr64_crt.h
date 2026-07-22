@@ -21,6 +21,14 @@ namespace interop {
         float srcRows;
         float intensity;
     };
+
+    // Push constants for the phosphor-glow prepass (bright-pass tent blur
+    // into a quarter-res target the CRT shader adds back as halation).
+    struct WR64GlowCB {
+        float2 srcSize;
+        float threshold;
+        float padding;
+    };
 #ifdef HLSL_CPU
 };
 #endif

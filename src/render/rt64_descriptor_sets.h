@@ -674,4 +674,24 @@ namespace RT64 {
             }
         }
     };
+
+    // WR64 fork: CRT-filter present pass — frame texture, linear sampler and
+    // the quarter-res phosphor-glow texture (WR64GlowPS output).
+    struct WR64CrtDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gInput;
+        uint32_t gSampler;
+        uint32_t gGlow;
+
+        WR64CrtDescriptorSet(const RenderSampler *sampler, RenderDevice *device = nullptr) {
+            builder.begin();
+            gInput = builder.addTexture(1);
+            gSampler = builder.addImmutableSampler(2, &sampler);
+            gGlow = builder.addTexture(3);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
 };

@@ -547,6 +547,7 @@ build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/Video
 build_pixel_shader(  rt64 "src/shaders/WR64MotionBlurPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/WR64SharpenPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/WR64CrtPS.hlsl")
+build_pixel_shader(  rt64 "src/shaders/WR64GlowPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/VideoInterfacePS.hlsl" "src/shaders/VideoInterfacePSPixel.hlsl" "-D PIXEL_ANTIALIASING")
 build_vertex_shader( rt64 "src/shaders/FullScreenVS.hlsl")
 build_vertex_shader( rt64 "src/shaders/Im3DVS.hlsl")

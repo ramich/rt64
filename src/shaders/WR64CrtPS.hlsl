@@ -23,6 +23,8 @@
 
 Texture2D<float4> gInput : register(t1);
 SamplerState gSampler : register(s2);
+// Quarter-res bright-pass blur (WR64GlowPS) added back as phosphor halation.
+Texture2D<float4> gGlow : register(t3);
 
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
     const float2 pixel = uv * gConstants.texSize;
@@ -61,7 +63,18 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     // the border-color sampler never bleeds).
     const float2 srcTube = d * 0.5f + 0.5f;
     const float2 srcPixel = rectMin + saturate(srcTube) * tubeSize;
-    float3 color = gInput.SampleLevel(gSampler, srcPixel / gConstants.texSize, 0).rgb;
+    const float2 srcUV = srcPixel / gConstants.texSize;
+    float3 color = gInput.SampleLevel(gSampler, srcUV, 0).rgb;
+
+    // P22 phosphor color: mild channel crosstalk toward the CRT phosphor
+    // primaries plus a touch of CRT gamma — the warm, slightly denser look
+    // of the tube. Scaled with intensity like everything else.
+    const float3 p22 = float3(
+        dot(color, float3(0.955f, 0.040f, 0.005f)),
+        dot(color, float3(0.030f, 0.960f, 0.010f)),
+        dot(color, float3(0.015f, 0.030f, 0.955f)));
+    color = lerp(color, p22, k);
+    color = pow(saturate(color), lerp(1.0f, 1.10f, k));
 
     // Resolution adaptivity: output pixels per source scanline drive both
     // the mask scale and the fade-out guard against moire.
@@ -88,6 +101,13 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
 
     // Mild vignette toward the tube corners.
     color *= 1.0f - 0.12f * k * r2 * r2;
+
+    // Phosphor glow / halation: add the quarter-res bright-pass blur on top
+    // of the masked image (emitted light scatters in the glass, so it sits
+    // over the grille/scanline pattern and softens it around highlights).
+    // Sampled at the distorted position so the glow curves with the image.
+    const float3 glow = gGlow.SampleLevel(gSampler, srcUV, 0).rgb;
+    color += glow * (0.35f * k);
 
     // Brightness compensation: the grille eats grilleStrength on 2 of 3
     // channels, the scanlines eat scanStrength/2 on average.

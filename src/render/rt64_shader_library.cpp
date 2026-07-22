@@ -49,6 +49,7 @@
 #include "shaders/WR64MotionBlurPS.hlsl.spirv.h"
 #include "shaders/WR64SharpenPS.hlsl.spirv.h"
 #include "shaders/WR64CrtPS.hlsl.spirv.h"
+#include "shaders/WR64GlowPS.hlsl.spirv.h"
 #include "shaders/FullScreenVS.hlsl.spirv.h"
 #include "shaders/Im3DVS.hlsl.spirv.h"
 #include "shaders/ComposePS.hlsl.spirv.h"
@@ -98,6 +99,7 @@
 #   include "shaders/WR64MotionBlurPS.hlsl.dxil.h"
 #   include "shaders/WR64SharpenPS.hlsl.dxil.h"
 #   include "shaders/WR64CrtPS.hlsl.dxil.h"
+#   include "shaders/WR64GlowPS.hlsl.dxil.h"
 #   include "shaders/FullScreenVS.hlsl.dxil.h"
 #   include "shaders/Im3DVS.hlsl.dxil.h"
 #   include "shaders/ComposePS.hlsl.dxil.h"
@@ -146,6 +148,7 @@
 #   include "shaders/WR64MotionBlurPS.hlsl.metal.h"
 #   include "shaders/WR64SharpenPS.hlsl.metal.h"
 #   include "shaders/WR64CrtPS.hlsl.metal.h"
+#   include "shaders/WR64GlowPS.hlsl.metal.h"
 #   include "shaders/FullScreenVS.hlsl.metal.h"
 #   include "shaders/Im3DVS.hlsl.metal.h"
 #   include "shaders/ComposePS.hlsl.metal.h"
@@ -677,11 +680,11 @@ namespace RT64 {
         }
 
         // WR64 fork: CRT filter (Trinitron look). Reads a scratch copy of the
-        // presented frame through a LINEAR sampler (the barrel curvature needs
-        // smooth UVs) and overwrites the swap chain. Reuses the video
-        // interface descriptor-set shape (texture t1 + immutable sampler s2).
+        // presented frame plus the quarter-res phosphor-glow texture through a
+        // LINEAR sampler (the barrel curvature needs smooth UVs) and
+        // overwrites the swap chain.
         {
-            VideoInterfaceDescriptorSet descriptorSet(samplerLibrary.linear.borderBorder.get());
+            WR64CrtDescriptorSet descriptorSet(samplerLibrary.linear.borderBorder.get());
             layoutBuilder.begin();
             layoutBuilder.addPushConstant(0, 0, sizeof(interop::WR64CrtCB), RenderShaderStageFlag::PIXEL);
             layoutBuilder.addDescriptorSet(descriptorSet);
@@ -697,6 +700,27 @@ namespace RT64 {
             pipelineDesc.vertexShader = fullScreenVertexShader.get();
             pipelineDesc.pixelShader = pixelShader.get();
             wr64Crt.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // WR64 fork: phosphor-glow prepass for the CRT filter — bright-pass
+        // tent blur of the frame into a quarter-res color target.
+        {
+            VideoInterfaceDescriptorSet descriptorSet(samplerLibrary.linear.borderBorder.get());
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::WR64GlowCB), RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            wr64Glow.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(WR64GlowPSBlobDXIL, WR64GlowPSBlobSPIRV, WR64GlowPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = wr64Glow.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM;
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            wr64Glow.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
     }
 

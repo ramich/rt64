@@ -4,6 +4,7 @@
 
 #include "rt64_present_queue.h"
 
+#include <algorithm>
 #include <thread>
 #include <vector>
 
@@ -418,7 +419,13 @@ namespace RT64 {
                 // blended result for the next present. Runs before the UI draw
                 // hook so menus/overlays stay sharp.
                 {
-                    const float blurK = rt64_wr64_get_motion_blur();
+                    // Phosphor persistence: with the CRT filter active, a very
+                    // small accumulation trail approximates the tube's phosphor
+                    // decay (highlights linger for a few frames). Reuses the
+                    // motion-blur machinery; an explicit Motion Blur setting
+                    // still wins if it is stronger.
+                    const float crtPersist = rt64_wr64_get_crt() * 0.12f;
+                    const float blurK = std::max(rt64_wr64_get_motion_blur(), crtPersist);
                     const ShaderRecord &blurShader = ext.shaderLibrary->wr64MotionBlur;
                     if (blurK > 0.0f && renderParams.texture != nullptr && blurShader.pipeline != nullptr) {
                         const uint32_t scWidth = ext.swapChain->getWidth();
@@ -490,10 +497,25 @@ namespace RT64 {
                             wr64ScratchWidth = scWidth;
                             wr64ScratchHeight = scHeight;
                         }
+                        // Quarter-res phosphor-glow target + descriptor sets.
+                        const uint32_t glowWidth = std::max(scWidth / 4u, 1u);
+                        const uint32_t glowHeight = std::max(scHeight / 4u, 1u);
+                        if (wr64Glow == nullptr || wr64GlowWidth != glowWidth || wr64GlowHeight != glowHeight) {
+                            wr64Glow = ext.device->createTexture(RenderTextureDesc::ColorTarget(glowWidth, glowHeight, RenderFormat::B8G8R8A8_UNORM));
+                            const RenderTexture *glowAttachment = wr64Glow.get();
+                            wr64GlowFb = ext.device->createFramebuffer(RenderFramebufferDesc(&glowAttachment, 1));
+                            wr64GlowDescSet = std::make_unique<VideoInterfaceDescriptorSet>(
+                                ext.shaderLibrary->samplerLibrary.linear.borderBorder.get(), ext.device);
+                            wr64GlowDescSet->setTexture(wr64GlowDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64GlowWidth = glowWidth;
+                            wr64GlowHeight = glowHeight;
+                            wr64CrtDescSet = nullptr; // rebind below (references the glow texture)
+                        }
                         if (wr64CrtDescSet == nullptr || wr64CrtDescWidth != scWidth || wr64CrtDescHeight != scHeight) {
-                            wr64CrtDescSet = std::make_unique<VideoInterfaceDescriptorSet>(
+                            wr64CrtDescSet = std::make_unique<WR64CrtDescriptorSet>(
                                 ext.shaderLibrary->samplerLibrary.linear.borderBorder.get(), ext.device);
                             wr64CrtDescSet->setTexture(wr64CrtDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64CrtDescSet->setTexture(wr64CrtDescSet->gGlow, wr64Glow.get(), RenderTextureLayout::SHADER_READ);
                             wr64CrtDescWidth = scWidth;
                             wr64CrtDescHeight = scHeight;
                         }
@@ -504,6 +526,25 @@ namespace RT64 {
                         commandList->copyTexture(wr64Scratch.get(), swapChainTexture);
                         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
                         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::SHADER_READ));
+
+                        // Phosphor-glow prepass: bright-pass tent blur of the
+                        // frame into the quarter-res target.
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64Glow.get(), RenderTextureLayout::COLOR_WRITE));
+                        commandList->setFramebuffer(wr64GlowFb.get());
+                        commandList->setPipeline(ext.shaderLibrary->wr64Glow.pipeline.get());
+                        commandList->setGraphicsPipelineLayout(ext.shaderLibrary->wr64Glow.pipelineLayout.get());
+                        commandList->setGraphicsDescriptorSet(wr64GlowDescSet->get(), 0);
+                        interop::WR64GlowCB glowCB;
+                        glowCB.srcSize.x = float(scWidth);
+                        glowCB.srcSize.y = float(scHeight);
+                        glowCB.threshold = 0.60f;
+                        glowCB.padding = 0.0f;
+                        commandList->setGraphicsPushConstants(0, &glowCB);
+                        commandList->setViewports(RenderViewport(0.0f, 0.0f, float(glowWidth), float(glowHeight)));
+                        commandList->setScissors(RenderRect(0, 0, int32_t(glowWidth), int32_t(glowHeight)));
+                        commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+                        commandList->drawInstanced(3, 1, 0, 0);
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64Glow.get(), RenderTextureLayout::SHADER_READ));
                         commandList->setFramebuffer(swapChainFramebuffer);
 
                         commandList->setPipeline(crtShader.pipeline.get());

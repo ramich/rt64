@@ -62,10 +62,16 @@ namespace RT64 {
         uint32_t wr64ScratchWidth = 0;
         uint32_t wr64ScratchHeight = 0;
         // WR64 fork: sampler-equipped descriptor set for the CRT pass (the
-        // curvature needs linear sampling; TextureCopyDescriptorSet has none).
-        std::unique_ptr<VideoInterfaceDescriptorSet> wr64CrtDescSet;
+        // curvature needs linear sampling; TextureCopyDescriptorSet has none)
+        // plus the quarter-res phosphor-glow target its prepass renders into.
+        std::unique_ptr<WR64CrtDescriptorSet> wr64CrtDescSet;
         uint32_t wr64CrtDescWidth = 0;
         uint32_t wr64CrtDescHeight = 0;
+        std::unique_ptr<RenderTexture> wr64Glow;
+        std::unique_ptr<RenderFramebuffer> wr64GlowFb;
+        std::unique_ptr<VideoInterfaceDescriptorSet> wr64GlowDescSet;
+        uint32_t wr64GlowWidth = 0;
+        uint32_t wr64GlowHeight = 0;
         // WR64 fork: pending screenshot readback (created on request).
         std::unique_ptr<RenderBuffer> wr64ShotBuffer;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;

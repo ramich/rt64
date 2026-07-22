@@ -76,6 +76,13 @@ namespace RT64 {
         std::unique_ptr<VideoInterfaceDescriptorSet> wr64GlowDescSet;
         uint32_t wr64GlowWidth = 0;
         uint32_t wr64GlowHeight = 0;
+        // Object identity of the textures the CRT/glow descriptor sets were
+        // bound to — size-only tracking can miss a reallocation (the scratch
+        // is also lazily recreated by the sharpen pass) and leave a set
+        // referencing a stale texture.
+        const RenderTexture *wr64GlowDescBoundScratch = nullptr;
+        const RenderTexture *wr64CrtDescBoundScratch = nullptr;
+        const RenderTexture *wr64CrtDescBoundGlow = nullptr;
         // WR64 fork: pending screenshot readback (created on request).
         std::unique_ptr<RenderBuffer> wr64ShotBuffer;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;

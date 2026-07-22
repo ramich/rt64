@@ -24,6 +24,7 @@
 extern "C" float rt64_wr64_get_motion_blur();
 extern "C" float rt64_wr64_get_sharpen();
 extern "C" float rt64_wr64_get_crt();
+extern "C" int rt64_wr64_get_crt_persist();
 extern "C" void rt64_wr64_get_content_rect(int32_t* x0, int32_t* y0, int32_t* x1, int32_t* y1);
 extern "C" float rt64_wr64_get_content_src_rows();
 bool rt64_wr64_take_screenshot_path(std::string& out);
@@ -283,6 +284,34 @@ namespace RT64 {
                 const RenderTexture *swapChainTexture = ext.swapChain->getTexture(i);
                 swapChainFramebuffers[i] = ext.device->createFramebuffer(RenderFramebufferDesc(&swapChainTexture, 1));
             }
+
+            // WR64: the swap chain was (re)created — drop ALL present-effect
+            // resources and history. The lazy (re)allocation below keys on
+            // SIZES only; across a fullscreen<->window transition sizes can
+            // transiently match while the descriptor sets still reference
+            // old texture objects (deleted with deferred destruction, so they
+            // keep serving a coherent STALE frame — seen as permanent image
+            // retention with the CRT filter's glow composite).
+            wr64PrevFrame = nullptr;
+            wr64PrevFrameDescSet = nullptr;
+            wr64PrevFrameWidth = 0;
+            wr64PrevFrameHeight = 0;
+            wr64PrevFrameValid = false;
+            wr64Scratch = nullptr;
+            wr64ScratchDescSet = nullptr;
+            wr64ScratchWidth = 0;
+            wr64ScratchHeight = 0;
+            wr64CrtDescSet = nullptr;
+            wr64CrtDescWidth = 0;
+            wr64CrtDescHeight = 0;
+            wr64Glow = nullptr;
+            wr64GlowFb = nullptr;
+            wr64GlowDescSet = nullptr;
+            wr64GlowWidth = 0;
+            wr64GlowHeight = 0;
+            wr64GlowDescBoundScratch = nullptr;
+            wr64CrtDescBoundScratch = nullptr;
+            wr64CrtDescBoundGlow = nullptr;
         }
         
         for (int32_t i = 0; i < framesToPresent; i++) {
@@ -424,7 +453,7 @@ namespace RT64 {
                     // decay (highlights linger for a few frames). Reuses the
                     // motion-blur machinery; an explicit Motion Blur setting
                     // still wins if it is stronger.
-                    const float crtPersist = rt64_wr64_get_crt() * 0.12f;
+                    const float crtPersist = rt64_wr64_get_crt_persist() ? (rt64_wr64_get_crt() * 0.12f) : 0.0f;
                     const float blurK = std::max(rt64_wr64_get_motion_blur(), crtPersist);
                     const ShaderRecord &blurShader = ext.shaderLibrary->wr64MotionBlur;
                     if (blurK > 0.0f && renderParams.texture != nullptr && blurShader.pipeline != nullptr) {
@@ -514,22 +543,28 @@ namespace RT64 {
                         // Quarter-res phosphor-glow target + descriptor sets.
                         const uint32_t glowWidth = std::max(scWidth / 4u, 1u);
                         const uint32_t glowHeight = std::max(scHeight / 4u, 1u);
-                        if (wr64Glow == nullptr || wr64GlowWidth != glowWidth || wr64GlowHeight != glowHeight) {
-                            wr64Glow = ext.device->createTexture(RenderTextureDesc::ColorTarget(glowWidth, glowHeight, RenderFormat::B8G8R8A8_UNORM));
-                            const RenderTexture *glowAttachment = wr64Glow.get();
-                            wr64GlowFb = ext.device->createFramebuffer(RenderFramebufferDesc(&glowAttachment, 1));
+                        if (wr64Glow == nullptr || wr64GlowWidth != glowWidth || wr64GlowHeight != glowHeight ||
+                            wr64GlowDescBoundScratch != wr64Scratch.get()) {
+                            if (wr64Glow == nullptr || wr64GlowWidth != glowWidth || wr64GlowHeight != glowHeight) {
+                                wr64Glow = ext.device->createTexture(RenderTextureDesc::ColorTarget(glowWidth, glowHeight, RenderFormat::B8G8R8A8_UNORM));
+                                const RenderTexture *glowAttachment = wr64Glow.get();
+                                wr64GlowFb = ext.device->createFramebuffer(RenderFramebufferDesc(&glowAttachment, 1));
+                            }
                             wr64GlowDescSet = std::make_unique<VideoInterfaceDescriptorSet>(
                                 ext.shaderLibrary->samplerLibrary.linear.borderBorder.get(), ext.device);
                             wr64GlowDescSet->setTexture(wr64GlowDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64GlowDescBoundScratch = wr64Scratch.get();
                             wr64GlowWidth = glowWidth;
                             wr64GlowHeight = glowHeight;
-                            wr64CrtDescSet = nullptr; // rebind below (references the glow texture)
                         }
-                        if (wr64CrtDescSet == nullptr || wr64CrtDescWidth != scWidth || wr64CrtDescHeight != scHeight) {
+                        if (wr64CrtDescSet == nullptr || wr64CrtDescWidth != scWidth || wr64CrtDescHeight != scHeight ||
+                            wr64CrtDescBoundScratch != wr64Scratch.get() || wr64CrtDescBoundGlow != wr64Glow.get()) {
                             wr64CrtDescSet = std::make_unique<WR64CrtDescriptorSet>(
                                 ext.shaderLibrary->samplerLibrary.linear.borderBorder.get(), ext.device);
                             wr64CrtDescSet->setTexture(wr64CrtDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
                             wr64CrtDescSet->setTexture(wr64CrtDescSet->gGlow, wr64Glow.get(), RenderTextureLayout::SHADER_READ);
+                            wr64CrtDescBoundScratch = wr64Scratch.get();
+                            wr64CrtDescBoundGlow = wr64Glow.get();
                             wr64CrtDescWidth = scWidth;
                             wr64CrtDescHeight = scHeight;
                         }

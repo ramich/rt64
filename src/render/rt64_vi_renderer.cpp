@@ -91,6 +91,20 @@ extern "C" float rt64_wr64_get_crt() {
     return wr64Crt.load(std::memory_order_relaxed);
 }
 
+// Whether the CRT filter contributes a subtle phosphor-persistence trail
+// (via the motion-blur accumulation pass). Default on; a diagnostic/opt-out
+// (WR64_CRT_PERSIST=0) since the accumulation buffer can ghost across
+// fullscreen<->window layout changes.
+static std::atomic<int> wr64CrtPersist{1};
+
+extern "C" void rt64_wr64_set_crt_persist(int enabled) {
+    wr64CrtPersist.store(enabled, std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_get_crt_persist() {
+    return wr64CrtPersist.load(std::memory_order_relaxed);
+}
+
 // WR64 game content rectangle ("tube") in swapchain pixel space, published by
 // VIRenderer::render() every present for the CRT pass: the final VI scissor
 // after crop43 pillarbox / frame-side bars / band blackout — i.e. exactly the

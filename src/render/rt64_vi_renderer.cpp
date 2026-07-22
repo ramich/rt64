@@ -74,6 +74,47 @@ extern "C" float rt64_wr64_get_sharpen() {
     return wr64Sharpen.load(std::memory_order_relaxed);
 }
 
+// WR64 CRT filter (Trinitron-style): intensity of the present-time CRT pass
+// (aperture grille + scanlines + slight curvature + rounded corners +
+// vignette), 0 = off (pass skipped entirely). Applied AFTER sharpen/motion
+// blur and before the UI draw hook — the mask sits "on the glass", the
+// launcher/overlays stay clean.
+static std::atomic<float> wr64Crt{0.0f};
+
+extern "C" void rt64_wr64_set_crt(float strength) {
+    if (!(strength >= 0.0f)) strength = 0.0f;   // also catches NaN
+    if (strength > 1.0f) strength = 1.0f;
+    wr64Crt.store(strength, std::memory_order_relaxed);
+}
+
+extern "C" float rt64_wr64_get_crt() {
+    return wr64Crt.load(std::memory_order_relaxed);
+}
+
+// WR64 game content rectangle ("tube") in swapchain pixel space, published by
+// VIRenderer::render() every present for the CRT pass: the final VI scissor
+// after crop43 pillarbox / frame-side bars / band blackout — i.e. exactly the
+// region the game image occupies. The CRT curvature/corners map onto this
+// rect, not the whole window (black bars stay flat black). Also publishes the
+// number of visible SOURCE rows so the scanline pitch tracks the game's real
+// scanlines rather than output pixels.
+static std::atomic<int32_t> wr64ContentX0{0};
+static std::atomic<int32_t> wr64ContentY0{0};
+static std::atomic<int32_t> wr64ContentX1{0};
+static std::atomic<int32_t> wr64ContentY1{0};
+static std::atomic<float>   wr64ContentSrcRows{240.0f};
+
+extern "C" void rt64_wr64_get_content_rect(int32_t* x0, int32_t* y0, int32_t* x1, int32_t* y1) {
+    *x0 = wr64ContentX0.load(std::memory_order_relaxed);
+    *y0 = wr64ContentY0.load(std::memory_order_relaxed);
+    *x1 = wr64ContentX1.load(std::memory_order_relaxed);
+    *y1 = wr64ContentY1.load(std::memory_order_relaxed);
+}
+
+extern "C" float rt64_wr64_get_content_src_rows() {
+    return wr64ContentSrcRows.load(std::memory_order_relaxed);
+}
+
 // WR64 screenshot request: the port hands a destination path; the present
 // queue consumes it on the next present (copies the final swap-chain image,
 // UI included, into a readback buffer and writes a PNG off-thread).
@@ -363,6 +404,38 @@ namespace RT64 {
                 scissor.left += inset;
                 scissor.right -= inset;
             }
+        }
+        {
+            // Publish the content rectangle + visible source rows for the CRT
+            // pass (see the getters above). Base = the final scissor (crop43 /
+            // side bars already applied); a partial single band (Border Area =
+            // Original bars in Expand) narrows it vertically. 2P split keeps
+            // the full scissor — both halves form ONE tube, like a real CRT.
+            RenderRect content = scissor;
+            float srcRows = 240.0f;
+            if (b1 > b0) {
+                srcRows = 240.0f;
+            } else if (a1 - a0 < 0.999f) {
+                content.top = std::max(scissor.top, sTop + int32_t(lround(a0 * sH)));
+                content.bottom = std::min(scissor.bottom, sTop + int32_t(lround(a1 * sH)));
+                srcRows = 240.0f * (a1 - a0);
+            } else if (wr64PresentCrop43.load(std::memory_order_relaxed) &&
+                       wr64Crop43Mode.load(std::memory_order_relaxed) != 0) {
+                // 4:3 borders-inset / content-zoom show the content rows only.
+                srcRows = 198.0f;
+            } else {
+                const float ovT = wr64OverscanT.load(std::memory_order_relaxed);
+                const float ovB = wr64OverscanB.load(std::memory_order_relaxed);
+                const float remain = 1.0f - ovT - ovB;
+                if (remain > 0.0f && remain < 1.0f) {
+                    srcRows = 240.0f * remain;
+                }
+            }
+            wr64ContentX0.store(content.left, std::memory_order_relaxed);
+            wr64ContentY0.store(content.top, std::memory_order_relaxed);
+            wr64ContentX1.store(content.right, std::memory_order_relaxed);
+            wr64ContentY1.store(content.bottom, std::memory_order_relaxed);
+            wr64ContentSrcRows.store(srcRows, std::memory_order_relaxed);
         }
         if (b1 > b0 && wr64SplitRemap.load(std::memory_order_relaxed) != 0) {
             // Two halves: source band [srcF0..srcF1] of the image maps onto

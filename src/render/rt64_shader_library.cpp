@@ -48,6 +48,7 @@
 #include "shaders/VideoInterfacePSPixel.hlsl.spirv.h"
 #include "shaders/WR64MotionBlurPS.hlsl.spirv.h"
 #include "shaders/WR64SharpenPS.hlsl.spirv.h"
+#include "shaders/WR64CrtPS.hlsl.spirv.h"
 #include "shaders/FullScreenVS.hlsl.spirv.h"
 #include "shaders/Im3DVS.hlsl.spirv.h"
 #include "shaders/ComposePS.hlsl.spirv.h"
@@ -96,6 +97,7 @@
 #   include "shaders/VideoInterfacePSPixel.hlsl.dxil.h"
 #   include "shaders/WR64MotionBlurPS.hlsl.dxil.h"
 #   include "shaders/WR64SharpenPS.hlsl.dxil.h"
+#   include "shaders/WR64CrtPS.hlsl.dxil.h"
 #   include "shaders/FullScreenVS.hlsl.dxil.h"
 #   include "shaders/Im3DVS.hlsl.dxil.h"
 #   include "shaders/ComposePS.hlsl.dxil.h"
@@ -143,6 +145,7 @@
 #   include "shaders/VideoInterfacePSPixel.hlsl.metal.h"
 #   include "shaders/WR64MotionBlurPS.hlsl.metal.h"
 #   include "shaders/WR64SharpenPS.hlsl.metal.h"
+#   include "shaders/WR64CrtPS.hlsl.metal.h"
 #   include "shaders/FullScreenVS.hlsl.metal.h"
 #   include "shaders/Im3DVS.hlsl.metal.h"
 #   include "shaders/ComposePS.hlsl.metal.h"
@@ -157,6 +160,7 @@
 #include "shared/rt64_video_interface.h"
 #include "shared/rt64_wr64_motion_blur.h"
 #include "shared/rt64_wr64_sharpen.h"
+#include "shared/rt64_wr64_crt.h"
 
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_target.h"
@@ -670,6 +674,29 @@ namespace RT64 {
             pipelineDesc.vertexShader = fullScreenVertexShader.get();
             pipelineDesc.pixelShader = pixelShader.get();
             wr64Sharpen.pipeline = device->createGraphicsPipeline(pipelineDesc);
+        }
+
+        // WR64 fork: CRT filter (Trinitron look). Reads a scratch copy of the
+        // presented frame through a LINEAR sampler (the barrel curvature needs
+        // smooth UVs) and overwrites the swap chain. Reuses the video
+        // interface descriptor-set shape (texture t1 + immutable sampler s2).
+        {
+            VideoInterfaceDescriptorSet descriptorSet(samplerLibrary.linear.borderBorder.get());
+            layoutBuilder.begin();
+            layoutBuilder.addPushConstant(0, 0, sizeof(interop::WR64CrtCB), RenderShaderStageFlag::PIXEL);
+            layoutBuilder.addDescriptorSet(descriptorSet);
+            layoutBuilder.end();
+            wr64Crt.pipelineLayout = layoutBuilder.create(device);
+
+            std::unique_ptr<RenderShader> pixelShader = device->createShader(CREATE_SHADER_INPUTS(WR64CrtPSBlobDXIL, WR64CrtPSBlobSPIRV, WR64CrtPSBlobMSL, "PSMain", shaderFormat));
+            RenderGraphicsPipelineDesc pipelineDesc;
+            pipelineDesc.pipelineLayout = wr64Crt.pipelineLayout.get();
+            pipelineDesc.renderTargetBlend[0] = RenderBlendDesc::Copy();
+            pipelineDesc.renderTargetFormat[0] = RenderFormat::B8G8R8A8_UNORM; // matches the swap chain
+            pipelineDesc.renderTargetCount = 1;
+            pipelineDesc.vertexShader = fullScreenVertexShader.get();
+            pipelineDesc.pixelShader = pixelShader.get();
+            wr64Crt.pipeline = device->createGraphicsPipeline(pipelineDesc);
         }
     }
 

@@ -61,6 +61,8 @@ namespace RT64 {
         ShaderRecord wr64MotionBlur;
         // WR64 fork: contrast-adaptive sharpen at present time.
         ShaderRecord wr64Sharpen;
+        // WR64 fork: CRT filter (Trinitron look) present pass.
+        ShaderRecord wr64Crt;
 
         ShaderLibrary(bool usesHDR, bool usesHardwareResolve);
         ~ShaderLibrary();

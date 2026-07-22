@@ -11,6 +11,7 @@
 #include "rhi/rt64_render_hooks.h"
 #include "shared/rt64_wr64_motion_blur.h"
 #include "shared/rt64_wr64_sharpen.h"
+#include "shared/rt64_wr64_crt.h"
 
 #include "rt64_workload_queue.h"
 
@@ -21,6 +22,9 @@
 // the pending-screenshot path for the present-time passes below.
 extern "C" float rt64_wr64_get_motion_blur();
 extern "C" float rt64_wr64_get_sharpen();
+extern "C" float rt64_wr64_get_crt();
+extern "C" void rt64_wr64_get_content_rect(int32_t* x0, int32_t* y0, int32_t* x1, int32_t* y1);
+extern "C" float rt64_wr64_get_content_src_rows();
 bool rt64_wr64_take_screenshot_path(std::string& out);
 
 namespace RT64 {
@@ -462,6 +466,69 @@ namespace RT64 {
                         // Off (or nothing rendered): drop history so re-enabling
                         // starts from a fresh frame.
                         wr64PrevFrameValid = false;
+                    }
+                }
+
+                // WR64 CRT filter (Trinitron look): LAST image pass — copy the
+                // (possibly sharpened/blurred) frame to the scratch texture and
+                // draw it back through the CRT shader. Running after the motion
+                // blur keeps the phosphor mask off the accumulation history
+                // ("the mask sits on the glass"); running before the UI draw
+                // hook keeps the launcher/overlays clean. The shader confines
+                // curvature/masks to the game content rect published by the VI
+                // renderer (rt64_wr64_get_content_rect) — black bars stay flat.
+                {
+                    const float crtK = rt64_wr64_get_crt();
+                    const ShaderRecord &crtShader = ext.shaderLibrary->wr64Crt;
+                    if (crtK > 0.0f && renderParams.texture != nullptr && crtShader.pipeline != nullptr) {
+                        const uint32_t scWidth = ext.swapChain->getWidth();
+                        const uint32_t scHeight = ext.swapChain->getHeight();
+                        if (wr64Scratch == nullptr || wr64ScratchWidth != scWidth || wr64ScratchHeight != scHeight) {
+                            wr64Scratch = ext.device->createTexture(RenderTextureDesc::Texture2D(scWidth, scHeight, 1, RenderFormat::B8G8R8A8_UNORM));
+                            wr64ScratchDescSet = std::make_unique<TextureCopyDescriptorSet>(ext.device);
+                            wr64ScratchDescSet->setTexture(wr64ScratchDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64ScratchWidth = scWidth;
+                            wr64ScratchHeight = scHeight;
+                        }
+                        if (wr64CrtDescSet == nullptr || wr64CrtDescWidth != scWidth || wr64CrtDescHeight != scHeight) {
+                            wr64CrtDescSet = std::make_unique<VideoInterfaceDescriptorSet>(
+                                ext.shaderLibrary->samplerLibrary.linear.borderBorder.get(), ext.device);
+                            wr64CrtDescSet->setTexture(wr64CrtDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64CrtDescWidth = scWidth;
+                            wr64CrtDescHeight = scHeight;
+                        }
+
+                        commandList->setFramebuffer(nullptr);
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COPY_SOURCE));
+                        commandList->barriers(RenderBarrierStage::COPY, RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::COPY_DEST));
+                        commandList->copyTexture(wr64Scratch.get(), swapChainTexture);
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
+                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::SHADER_READ));
+                        commandList->setFramebuffer(swapChainFramebuffer);
+
+                        commandList->setPipeline(crtShader.pipeline.get());
+                        commandList->setGraphicsPipelineLayout(crtShader.pipelineLayout.get());
+                        commandList->setGraphicsDescriptorSet(wr64CrtDescSet->get(), 0);
+
+                        int32_t cx0 = 0, cy0 = 0, cx1 = 0, cy1 = 0;
+                        rt64_wr64_get_content_rect(&cx0, &cy0, &cx1, &cy1);
+                        interop::WR64CrtCB crtCB;
+                        crtCB.rectMin.x = float(cx0);
+                        crtCB.rectMin.y = float(cy0);
+                        crtCB.rectMax.x = float(cx1);
+                        crtCB.rectMax.y = float(cy1);
+                        crtCB.texSize.x = float(scWidth);
+                        crtCB.texSize.y = float(scHeight);
+                        crtCB.srcRows = rt64_wr64_get_content_src_rows();
+                        crtCB.intensity = crtK;
+                        commandList->setGraphicsPushConstants(0, &crtCB);
+
+                        const RenderViewport crtViewport(0.0f, 0.0f, float(scWidth), float(scHeight));
+                        const RenderRect crtScissor(0, 0, int32_t(scWidth), int32_t(scHeight));
+                        commandList->setViewports(crtViewport);
+                        commandList->setScissors(crtScissor);
+                        commandList->setVertexBuffers(0, nullptr, 0, nullptr);
+                        commandList->drawInstanced(3, 1, 0, 0);
                     }
                 }
 

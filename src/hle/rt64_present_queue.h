@@ -55,11 +55,17 @@ namespace RT64 {
         uint32_t wr64PrevFrameWidth = 0;
         uint32_t wr64PrevFrameHeight = 0;
         bool wr64PrevFrameValid = false;
-        // WR64 fork: scratch copy of the current frame for the sharpen pass.
+        // WR64 fork: scratch copy of the current frame for the sharpen pass
+        // (reused by the CRT pass, which runs after it).
         std::unique_ptr<RenderTexture> wr64Scratch;
         std::unique_ptr<TextureCopyDescriptorSet> wr64ScratchDescSet;
         uint32_t wr64ScratchWidth = 0;
         uint32_t wr64ScratchHeight = 0;
+        // WR64 fork: sampler-equipped descriptor set for the CRT pass (the
+        // curvature needs linear sampling; TextureCopyDescriptorSet has none).
+        std::unique_ptr<VideoInterfaceDescriptorSet> wr64CrtDescSet;
+        uint32_t wr64CrtDescWidth = 0;
+        uint32_t wr64CrtDescHeight = 0;
         // WR64 fork: pending screenshot readback (created on request).
         std::unique_ptr<RenderBuffer> wr64ShotBuffer;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;

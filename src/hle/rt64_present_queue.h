@@ -55,6 +55,10 @@ namespace RT64 {
         uint32_t wr64PrevFrameWidth = 0;
         uint32_t wr64PrevFrameHeight = 0;
         bool wr64PrevFrameValid = false;
+        // Content rect of the frame captured into wr64PrevFrame; if the layout
+        // changes (fullscreen<->window, aspect/crop switch) the stored frame no
+        // longer matches and blending it would ghost, so history is dropped.
+        int32_t wr64PrevContentX0 = 0, wr64PrevContentY0 = 0, wr64PrevContentX1 = 0, wr64PrevContentY1 = 0;
         // WR64 fork: scratch copy of the current frame for the sharpen pass
         // (reused by the CRT pass, which runs after it).
         std::unique_ptr<RenderTexture> wr64Scratch;

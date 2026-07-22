@@ -439,6 +439,18 @@ namespace RT64 {
                             wr64PrevFrameValid = false;
                         }
 
+                        // Drop history when the game-image layout changed since
+                        // the stored frame (fullscreen<->window, aspect/crop/
+                        // border-mode switch). Blending a differently-placed
+                        // previous frame would ghost/stretch (user-reported on
+                        // the FS<->window toggle).
+                        int32_t curX0 = 0, curY0 = 0, curX1 = 0, curY1 = 0;
+                        rt64_wr64_get_content_rect(&curX0, &curY0, &curX1, &curY1);
+                        if (curX0 != wr64PrevContentX0 || curY0 != wr64PrevContentY0 ||
+                            curX1 != wr64PrevContentX1 || curY1 != wr64PrevContentY1) {
+                            wr64PrevFrameValid = false;
+                        }
+
                         if (wr64PrevFrameValid) {
                             commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64PrevFrame.get(), RenderTextureLayout::SHADER_READ));
                             commandList->setPipeline(blurShader.pipeline.get());
@@ -468,6 +480,8 @@ namespace RT64 {
                         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
                         commandList->setFramebuffer(swapChainFramebuffer);
                         wr64PrevFrameValid = true;
+                        wr64PrevContentX0 = curX0; wr64PrevContentY0 = curY0;
+                        wr64PrevContentX1 = curX1; wr64PrevContentY1 = curY1;
                     }
                     else {
                         // Off (or nothing rendered): drop history so re-enabling

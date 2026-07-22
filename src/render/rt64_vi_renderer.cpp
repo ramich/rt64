@@ -29,6 +29,20 @@ extern "C" int rt64_wr64_get_present_crop43() {
     return wr64PresentCrop43.load(std::memory_order_relaxed) ? 1 : 0;
 }
 
+// Crop43 sub-mode, following the port's Border Area setting for 4:3 GAMEPLAY:
+//   0 = menu (default): full 4:3 box with the 1.08 overscan zoom (menus).
+//   1 = borders: inset the scissor's top/bottom to the game's content rect
+//       (rows 20..218 of 240) so the uncleared framebuffer strip above the
+//       content and the bottom overscan margin present as the black swapchain
+//       clear — i.e. the game's original black borders.
+//   2 = content zoom: remap the viewport so the content rect (8,20)-(310,218)
+//       fills the whole 4:3 box — overscan crop with scale-up, 4:3 flavor.
+static std::atomic<int> wr64Crop43Mode{0};
+
+extern "C" void rt64_wr64_set_crop43_mode(int mode) {
+    wr64Crop43Mode.store(mode, std::memory_order_relaxed);
+}
+
 // WR64 motion blur (prototype): exponential accumulation at present time. The
 // strength is the alpha the PREVIOUS presented frame is drawn with over the
 // current one (0 = off, ~0.5 = moderate trail, capped below 1 so it decays).
@@ -185,6 +199,17 @@ extern "C" void rt64_wr64_set_split_remap(int enabled) {
     wr64SplitRemap.store(enabled, std::memory_order_relaxed);
 }
 
+// WR64 Border Area = Original in Expand (widescreen): black side bars over
+// the outer edges of the widened world. The extreme margins of the world
+// expansion show artifacts (blurry seams, stale bands), so the bars are
+// deliberately WIDER than the original border columns — the port passes the
+// fraction of the presented width to black out per side (0 = off).
+static std::atomic<float> wr64FrameSideFrac{0.0f};
+
+extern "C" void rt64_wr64_set_frame_sides(float frac) {
+    wr64FrameSideFrac.store(frac, std::memory_order_relaxed);
+}
+
 // Presented-frame counter (one per VI present, i.e. including interpolated
 // frames) for the port's FPS readout — the game-frame counter only ticks at
 // the game's native ~20 Hz.
@@ -326,6 +351,19 @@ namespace RT64 {
         const float b1 = wr64SplitB1.load(std::memory_order_relaxed);
         const int32_t sTop = scissor.top;
         const int32_t sH = scissor.bottom - scissor.top;
+        {
+            // Original-borders side bars in Expand (see the setter above):
+            // inset the present scissor left/right by the configured fraction
+            // of the visible width; the excluded margins present as the black
+            // swapchain clear. The top/bottom border bands arrive separately
+            // via the split bands below.
+            const float sideFrac = wr64FrameSideFrac.load(std::memory_order_relaxed);
+            if (sideFrac > 0.0f) {
+                const int32_t inset = int32_t(lround(float(scissor.right - scissor.left) * sideFrac));
+                scissor.left += inset;
+                scissor.right -= inset;
+            }
+        }
         if (b1 > b0 && wr64SplitRemap.load(std::memory_order_relaxed) != 0) {
             // Two halves: source band [srcF0..srcF1] of the image maps onto
             // destination band [dstF0..dstF1] of the scissor area.
@@ -407,18 +445,69 @@ namespace RT64 {
             scissor.left = std::max(scissor.left, int32_t(lround(centerX - halfWidth)));
             scissor.right = std::min(scissor.right, int32_t(lround(centerX + halfWidth)));
 
-            // Overscan zoom: WR64's menus assume a TV's overscan hides the frame
-            // edges, but our exact 4:3 crop exposes parked-world content sitting
-            // in that overscan margin (e.g. the stray craft at the right edge of
-            // the 2P watercraft-select). Enlarge the blit ~8% about its center so
-            // the overscan band falls outside the scissor. Menu panels live well
-            // inside the overscan-safe area, so this doesn't clip real content.
-            const float overscan = 1.08f;
-            const float vcx = viewport.x + viewport.width * 0.5f;
-            const float vcy = viewport.y + viewport.height * 0.5f;
-            const float nw = viewport.width * overscan;
-            const float nh = viewport.height * overscan;
-            viewport = RenderViewport(vcx - nw * 0.5f, vcy - nh * 0.5f, nw, nh);
+            const int crop43Mode = wr64Crop43Mode.load(std::memory_order_relaxed);
+            if (crop43Mode == 1) {
+                // 4:3 GAMEPLAY, borders mode: inset the scissor to the game's
+                // content rect (8,20)-(310,218) on ALL four sides so the
+                // border band presents as the black swapchain clear — the
+                // game's original black borders. The band is NOT black in the
+                // framebuffer: it is uncleared memory a real TV's overscan
+                // hid (visibly flickering in-race if displayed), so the whole
+                // band must be scissored out, sides included. No overscan
+                // zoom here (that is menu-only).
+                const int32_t top0 = scissor.top;
+                const int32_t left0 = scissor.left;
+                const float boxW = float(scissor.right - scissor.left);
+                scissor.top = top0 + int32_t(lround(scissorHeight * (20.0f / 240.0f)));
+                scissor.bottom = top0 + int32_t(lround(scissorHeight * (218.0f / 240.0f)));
+                scissor.left = left0 + int32_t(lround(boxW * (8.0f / 320.0f)));
+                scissor.right = left0 + int32_t(lround(boxW * (310.0f / 320.0f)));
+            } else if (crop43Mode == 2) {
+                // 4:3 GAMEPLAY, overscan-crop mode: remap the viewport so the
+                // SD content rect (8,20)-(310,218) fills the whole 4:3 box.
+                // Within the box, SD x spans 0..320 and y spans 0..240; the
+                // affine remap p -> boxStart + (p - inset0)/contentSize * boxSize
+                // applied to the viewport crops the border margins with
+                // scale-up (no black bars, no junk strip), like the widescreen
+                // overscan crop but confined to the pillarboxed 4:3 area.
+                const float boxL = float(scissor.left);
+                const float boxT = float(scissor.top);
+                const float boxW = float(scissor.right - scissor.left);
+                const float boxH = float(scissor.bottom - scissor.top);
+                const float sx = 320.0f / 302.0f;  // content cols 8..310
+                const float sy = 240.0f / 198.0f;  // content rows 20..218
+                const float vx = boxL + (viewport.x - boxL) * sx - (8.0f / 302.0f) * boxW;
+                const float vy = boxT + (viewport.y - boxT) * sy - (20.0f / 198.0f) * boxH;
+                viewport = RenderViewport(vx, vy, viewport.width * sx, viewport.height * sy);
+            } else {
+                // Overscan zoom: WR64's menus assume a TV's overscan hides the
+                // frame edges, but our exact 4:3 crop exposes parked-world
+                // content sitting in that overscan margin (e.g. the stray craft
+                // at the right edge of the 2P watercraft-select). Enlarge the
+                // blit ~8% about its center so the overscan band falls outside
+                // the scissor. Menu panels live well inside the overscan-safe
+                // area, so this doesn't clip real content.
+                const float overscan = 1.08f;
+                const float vcx = viewport.x + viewport.width * 0.5f;
+                const float vcy = viewport.y + viewport.height * 0.5f;
+                const float nw = viewport.width * overscan;
+                const float nh = viewport.height * overscan;
+                viewport = RenderViewport(vcx - nw * 0.5f, vcy - nh * 0.5f, nw, nh);
+
+                // Vertical clamp: the zoom fully pushes the SIDE border band
+                // out of the box (cols 8/310 land outside at 1.08x), but only
+                // ~4% of the ~8-9% TALL border band — the rest of the
+                // uncleared rows (garbage that flickers in some menus, e.g.
+                // player select) would still show. Scissor to the zoomed
+                // positions of the content rows 20..218 so the remainder
+                // presents as black without cropping any real menu content.
+                auto zoomedRow = [&](float row) {
+                    return 0.5f + (row / 240.0f - 0.5f) * overscan;
+                };
+                const int32_t boxTop = scissor.top;
+                scissor.top = boxTop + int32_t(lround(scissorHeight * zoomedRow(20.0f)));
+                scissor.bottom = boxTop + int32_t(lround(scissorHeight * zoomedRow(218.0f)));
+            }
         }
 
         // WR64 gameplay overscan crop (see the setters above): remap the

@@ -19,15 +19,11 @@ namespace interop {
         float2 rectMax;
         float2 texSize;
         float srcRows;
-        float intensity;
-    };
-
-    // Push constants for the phosphor-glow prepass (bright-pass tent blur
-    // into a quarter-res target the CRT shader adds back as halation).
-    struct WR64GlowCB {
-        float2 srcSize;
-        float threshold;
-        float padding;
+        float intensity;   // grille/scanline/curvature/glow strength (0..1)
+        float bezel;       // 1 = draw the TV bezel frame (fixed strength), 0 = off
+        float pad0;
+        float pad1;
+        float pad2;
     };
 #ifdef HLSL_CPU
 };

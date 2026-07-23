@@ -66,23 +66,23 @@ namespace RT64 {
         uint32_t wr64ScratchWidth = 0;
         uint32_t wr64ScratchHeight = 0;
         // WR64 fork: sampler-equipped descriptor set for the CRT pass (the
-        // curvature needs linear sampling; TextureCopyDescriptorSet has none)
-        // plus the quarter-res phosphor-glow target its prepass renders into.
-        std::unique_ptr<WR64CrtDescriptorSet> wr64CrtDescSet;
+        // curvature + inline halation need linear sampling; the
+        // TextureCopyDescriptorSet used by sharpen has no sampler). The
+        // phosphor glow is now computed inline in the shader — no separate
+        // glow render target (that second target retained stale memory across
+        // window resizes and produced permanent garbage bands).
+        std::unique_ptr<VideoInterfaceDescriptorSet> wr64CrtDescSet;
         uint32_t wr64CrtDescWidth = 0;
         uint32_t wr64CrtDescHeight = 0;
-        std::unique_ptr<RenderTexture> wr64Glow;
-        std::unique_ptr<RenderFramebuffer> wr64GlowFb;
-        std::unique_ptr<VideoInterfaceDescriptorSet> wr64GlowDescSet;
-        uint32_t wr64GlowWidth = 0;
-        uint32_t wr64GlowHeight = 0;
-        // Object identity of the textures the CRT/glow descriptor sets were
+        // Object identity of the scratch texture the CRT descriptor set was
         // bound to — size-only tracking can miss a reallocation (the scratch
-        // is also lazily recreated by the sharpen pass) and leave a set
-        // referencing a stale texture.
-        const RenderTexture *wr64GlowDescBoundScratch = nullptr;
+        // is also lazily recreated by the sharpen pass).
         const RenderTexture *wr64CrtDescBoundScratch = nullptr;
-        const RenderTexture *wr64CrtDescBoundGlow = nullptr;
+        // Set when the swapchain was (re)created for this present: the effect
+        // passes sit the frame out (plain present). During a drag-resize the
+        // swapchain is rebuilt almost every present and freshly allocated
+        // textures hold recycled VRAM — compositing them artifacts visibly.
+        bool wr64SkipEffectsOnce = false;
         // WR64 fork: pending screenshot readback (created on request).
         std::unique_ptr<RenderBuffer> wr64ShotBuffer;
         std::unique_ptr<RenderCommandSemaphore> acquiredSemaphore;

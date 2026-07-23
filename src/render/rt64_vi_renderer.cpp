@@ -92,10 +92,11 @@ extern "C" float rt64_wr64_get_crt() {
 }
 
 // Whether the CRT filter contributes a subtle phosphor-persistence trail
-// (via the motion-blur accumulation pass). Default on; a diagnostic/opt-out
-// (WR64_CRT_PERSIST=0) since the accumulation buffer can ghost across
-// fullscreen<->window layout changes.
-static std::atomic<int> wr64CrtPersist{1};
+// (via the motion-blur accumulation pass). Default OFF: the accumulation
+// buffer settles into a permanent hazy retention across a manual window
+// drag-resize (the swap chain rebuilds every present and the trail never
+// re-converges). Opt back in with WR64_CRT_PERSIST=1 if you don't resize.
+static std::atomic<int> wr64CrtPersist{0};
 
 extern "C" void rt64_wr64_set_crt_persist(int enabled) {
     wr64CrtPersist.store(enabled, std::memory_order_relaxed);
@@ -103,6 +104,19 @@ extern "C" void rt64_wr64_set_crt_persist(int enabled) {
 
 extern "C" int rt64_wr64_get_crt_persist() {
     return wr64CrtPersist.load(std::memory_order_relaxed);
+}
+
+// CRT bezel: the TV-frame-with-depth + reflection around the tube. Independent
+// on/off toggle at FIXED strength (does not scale with the CRT intensity).
+// Default on.
+static std::atomic<int> wr64CrtBezel{1};
+
+extern "C" void rt64_wr64_set_crt_bezel(int enabled) {
+    wr64CrtBezel.store(enabled, std::memory_order_relaxed);
+}
+
+extern "C" int rt64_wr64_get_crt_bezel() {
+    return wr64CrtBezel.load(std::memory_order_relaxed);
 }
 
 // WR64 game content rectangle ("tube") in swapchain pixel space, published by

@@ -674,4 +674,25 @@ namespace RT64 {
             }
         }
     };
+
+    // WR64: CRT present pass — same as VideoInterfaceDescriptorSet plus a
+    // second texture (t3) for the bezel overlay image. A dedicated type keeps
+    // the plain VI blit (which uses VideoInterfaceDescriptorSet) untouched.
+    struct WR64CrtDescriptorSet : RenderDescriptorSetBase {
+        uint32_t gInput;
+        uint32_t gBezel;
+        uint32_t gSampler;
+
+        WR64CrtDescriptorSet(const RenderSampler *sampler, RenderDevice *device = nullptr) {
+            builder.begin();
+            gInput = builder.addTexture(1);
+            gBezel = builder.addTexture(2);
+            gSampler = builder.addImmutableSampler(3, &sampler);
+            builder.end();
+
+            if (device != nullptr) {
+                create(device);
+            }
+        }
+    };
 };

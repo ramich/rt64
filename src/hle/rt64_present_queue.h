@@ -6,6 +6,7 @@
 
 #include "common/rt64_profiling_timer.h"
 #include "gui/rt64_inspector.h"
+#include "render/rt64_texture.h"
 #include "render/rt64_vi_renderer.h"
 
 #include "rt64_application_window.h"
@@ -71,9 +72,17 @@ namespace RT64 {
         // phosphor glow is now computed inline in the shader — no separate
         // glow render target (that second target retained stale memory across
         // window resizes and produced permanent garbage bands).
-        std::unique_ptr<VideoInterfaceDescriptorSet> wr64CrtDescSet;
+        std::unique_ptr<WR64CrtDescriptorSet> wr64CrtDescSet;
         uint32_t wr64CrtDescWidth = 0;
         uint32_t wr64CrtDescHeight = 0;
+        // WR64 fork: CRT bezel overlay image (assets/crt_bezel.png). Decoded
+        // once via TextureCache::loadTextureFromBytes and kept resident — it is
+        // window-size independent, so it must NOT be dropped on a swapchain
+        // rebuild (only wr64Scratch is). Bound to the CRT descriptor's gBezel
+        // slot; if the file is missing the bezel silently stays off.
+        std::unique_ptr<Texture> wr64BezelTex;
+        std::unique_ptr<RenderBuffer> wr64BezelUpload;
+        bool wr64BezelLoadTried = false;
         // Object identity of the scratch texture the CRT descriptor set was
         // bound to — size-only tracking can miss a reallocation (the scratch
         // is also lazily recreated by the sharpen pass).

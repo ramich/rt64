@@ -5,6 +5,8 @@
 #include "rt64_present_queue.h"
 
 #include <algorithm>
+#include <cstdlib>
+#include <fstream>
 #include <thread>
 #include <vector>
 
@@ -14,6 +16,7 @@
 #include "shared/rt64_wr64_sharpen.h"
 #include "shared/rt64_wr64_crt.h"
 
+#include "render/rt64_texture_cache.h"
 #include "rt64_workload_queue.h"
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
@@ -539,11 +542,46 @@ namespace RT64 {
                             wr64ScratchWidth = scWidth;
                             wr64ScratchHeight = scHeight;
                         }
+
+                        // One-time bezel overlay load (assets/crt_bezel.png).
+                        // Decoded through the texture cache's PNG path onto this
+                        // present command list; kept resident (window-size
+                        // independent). Missing file => bezel silently disabled.
+                        if (!wr64BezelLoadTried) {
+                            wr64BezelLoadTried = true;
+                            const bool bezelLog = std::getenv("WR64_DEBUG_LOG") != nullptr;
+                            std::ifstream bezelFile("assets/crt_bezel.png", std::ios::binary);
+                            if (bezelFile) {
+                                std::vector<uint8_t> bezelBytes((std::istreambuf_iterator<char>(bezelFile)), std::istreambuf_iterator<char>());
+                                if (!bezelBytes.empty()) {
+                                    commandList->setFramebuffer(nullptr);
+                                    Texture *loaded = TextureCache::loadTextureFromBytes(ext.device, commandList, bezelBytes, wr64BezelUpload);
+                                    if (loaded != nullptr && loaded->texture != nullptr) {
+                                        commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(loaded->texture.get(), RenderTextureLayout::SHADER_READ));
+                                        wr64BezelTex.reset(loaded);
+                                        if (bezelLog) fprintf(stderr, "[WR64] CRT bezel image loaded (%zu bytes)\n", bezelBytes.size());
+                                    }
+                                    else {
+                                        delete loaded;
+                                        if (bezelLog) fprintf(stderr, "[WR64] CRT bezel image decode FAILED\n");
+                                    }
+                                }
+                            }
+                            else if (bezelLog) {
+                                fprintf(stderr, "[WR64] CRT bezel image assets/crt_bezel.png not found\n");
+                            }
+                        }
+
                         if (wr64CrtDescSet == nullptr || wr64CrtDescWidth != scWidth || wr64CrtDescHeight != scHeight ||
                             wr64CrtDescBoundScratch != wr64Scratch.get()) {
-                            wr64CrtDescSet = std::make_unique<VideoInterfaceDescriptorSet>(
+                            wr64CrtDescSet = std::make_unique<WR64CrtDescriptorSet>(
                                 ext.shaderLibrary->samplerLibrary.linear.borderBorder.get(), ext.device);
                             wr64CrtDescSet->setTexture(wr64CrtDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            // gBezel: the overlay image, or the scratch as a
+                            // harmless placeholder if the PNG failed to load
+                            // (the shader is told bezel=0 in that case).
+                            const RenderTexture *bezelRt = (wr64BezelTex != nullptr) ? wr64BezelTex->texture.get() : wr64Scratch.get();
+                            wr64CrtDescSet->setTexture(wr64CrtDescSet->gBezel, bezelRt, RenderTextureLayout::SHADER_READ);
                             wr64CrtDescBoundScratch = wr64Scratch.get();
                             wr64CrtDescWidth = scWidth;
                             wr64CrtDescHeight = scHeight;
@@ -572,7 +610,8 @@ namespace RT64 {
                         crtCB.texSize.y = float(scHeight);
                         crtCB.srcRows = rt64_wr64_get_content_src_rows();
                         crtCB.intensity = crtK;
-                        crtCB.bezel = crtBezel ? 1.0f : 0.0f;
+                        // Bezel only when its overlay image actually loaded.
+                        crtCB.bezel = (crtBezel && wr64BezelTex != nullptr) ? 1.0f : 0.0f;
                         crtCB.pad0 = crtCB.pad1 = crtCB.pad2 = 0.0f;
                         commandList->setGraphicsPushConstants(0, &crtCB);
 

@@ -680,7 +680,7 @@ namespace RT64 {
         // presented frame through a LINEAR sampler (the barrel curvature and
         // inline halation need smooth UVs) and overwrites the swap chain.
         {
-            VideoInterfaceDescriptorSet descriptorSet(samplerLibrary.linear.borderBorder.get());
+            WR64CrtDescriptorSet descriptorSet(samplerLibrary.linear.borderBorder.get());
             layoutBuilder.begin();
             layoutBuilder.addPushConstant(0, 0, sizeof(interop::WR64CrtCB), RenderShaderStageFlag::PIXEL);
             layoutBuilder.addDescriptorSet(descriptorSet);

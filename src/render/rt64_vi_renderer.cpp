@@ -126,6 +126,23 @@ extern "C" int rt64_wr64_get_crt_bezel() {
 // rect, not the whole window (black bars stay flat black). Also publishes the
 // number of visible SOURCE rows so the scanline pitch tracks the game's real
 // scanlines rather than output pixels.
+// Tube policy for the CRT/bezel: 1 = the tube is the 4:3 crop box (AR =
+// Original), 0 = the tube is the full base present area (AR = Expand). Set
+// by the port from its aspect selection. The tube must be STABLE across
+// menu<->gameplay transitions — a real TV's frame doesn't move when the
+// picture letterboxes — so it deliberately ignores the per-scene menu
+// crop43 pillarbox in Expand (the pillarbox shows INSIDE the glass).
+static std::atomic<int> wr64Tube43{0};
+
+extern "C" void rt64_wr64_set_tube43(int enabled) {
+    wr64Tube43.store(enabled, std::memory_order_relaxed);
+}
+
+// Stashed by getViewportAndScissor for the tube publish below (same thread).
+static RenderRect wr64BaseScissor{};
+static RenderRect wr64Box43Scissor{};
+static bool wr64Box43Valid = false;
+
 static std::atomic<int32_t> wr64ContentX0{0};
 static std::atomic<int32_t> wr64ContentY0{0};
 static std::atomic<int32_t> wr64ContentX1{0};
@@ -434,18 +451,33 @@ namespace RT64 {
             }
         }
         {
-            // Publish the content rectangle + visible source rows for the CRT
-            // pass (see the getters above). Base = the final scissor (crop43 /
-            // side bars already applied); a partial single band (Border Area =
-            // Original bars in Expand) narrows it vertically. 2P split keeps
-            // the full scissor — both halves form ONE tube, like a real CRT.
-            RenderRect content = scissor;
+            // Publish the tube rectangle + visible source rows for the CRT/
+            // bezel pass (see the getters above). The tube is the STABLE
+            // glass area of the simulated CRT and must not move between menus
+            // and gameplay (a real TV's frame doesn't jump when the picture
+            // pillarboxes) — so it ignores the per-scene crop43 narrowing:
+            //   AR = Expand (wr64Tube43 == 0): tube = the base present area;
+            //     the menu pillarbox and any Border Area bars show INSIDE the
+            //     glass, curved along with the image.
+            //   AR = Original (wr64Tube43 == 1): tube = the 4:3 crop box,
+            //     which is identical for menus and gameplay in that aspect.
+            // 2P split keeps one tube spanning both halves, like the console.
+            RenderRect content;
+            if (wr64Tube43.load(std::memory_order_relaxed) != 0 && wr64Box43Valid) {
+                // AR = Original: the tube is the fixed 4:3 crop box.
+                content = wr64Box43Scissor;
+            } else {
+                // AR = Expand: the tube is the FULL window, always — so the
+                // simulated TV stays put from the very first frame even when
+                // the game hands the VI a narrower rectangle (e.g. the 4:3
+                // N64 boot logo, which then pillarboxes INSIDE the wide glass)
+                // rather than following the per-scene VI rect.
+                content = RenderRect(0, 0, int32_t(p.swapChain->getWidth()), int32_t(p.swapChain->getHeight()));
+            }
             float srcRows = 240.0f;
             if (b1 > b0) {
                 srcRows = 240.0f;
             } else if (a1 - a0 < 0.999f) {
-                content.top = std::max(scissor.top, sTop + int32_t(lround(a0 * sH)));
-                content.bottom = std::min(scissor.bottom, sTop + int32_t(lround(a1 * sH)));
                 srcRows = 240.0f * (a1 - a0);
             } else if (wr64PresentCrop43.load(std::memory_order_relaxed) &&
                        wr64Crop43Mode.load(std::memory_order_relaxed) != 0) {
@@ -539,12 +571,22 @@ namespace RT64 {
         viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
         scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
 
+        // Stash the pre-crop43 base area for the stable CRT tube (see
+        // wr64Tube43 above).
+        wr64BaseScissor = scissor;
+        wr64Box43Valid = false;
+
         if (wr64PresentCrop43.load(std::memory_order_relaxed)) {
             const float scissorHeight = float(scissor.bottom - scissor.top);
             const float centerX = (float(scissor.left) + float(scissor.right)) * 0.5f;
             const float halfWidth = scissorHeight * (4.0f / 3.0f) * 0.5f;
             scissor.left = std::max(scissor.left, int32_t(lround(centerX - halfWidth)));
             scissor.right = std::min(scissor.right, int32_t(lround(centerX + halfWidth)));
+
+            // The 4:3 box (before any mode-specific insets/zooms) is the
+            // stable tube in AR = Original.
+            wr64Box43Scissor = scissor;
+            wr64Box43Valid = true;
 
             const int crop43Mode = wr64Crop43Mode.load(std::memory_order_relaxed);
             if (crop43Mode == 1) {

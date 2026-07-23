@@ -167,9 +167,12 @@ namespace RT64 {
                 if ((address >> 24) == 0x03) {
                     wr64LastSeg3ProjM11 = float(floatMatrix[1].y);
                 }
-                // TEMP (WR64 culling hunt): log decoded projection loads.
+                // WR64 culling-hunt diagnostic: log decoded projection loads.
+                // Gated behind WR64_DEBUG_LOG=1 (was unconditional and flooded
+                // the terminal every frame).
+                static const char *wr64_projlog = std::getenv("WR64_DEBUG_LOG");
                 static int wr64_dbg_count = 0;
-                if ((wr64_dbg_count++ % 120) == 0) {
+                if (wr64_projlog != nullptr && wr64_projlog[0] == '1' && (wr64_dbg_count++ % 120) == 0) {
                     fprintf(stderr, "[RT64-PROJ] seg=0x%08X phys=0x%08X m00=%f m11=%f m22=%f m32=%f m33=%f\n",
                         address, fromSegmentedMasked(address),
                         float(floatMatrix[0].x), float(floatMatrix[1].y), float(floatMatrix[2].z),

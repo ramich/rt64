@@ -36,7 +36,7 @@ SamplerState gSampler : register(s3);
 // Cutout inset of the bezel PNG as a fraction of the presented rect per axis.
 // SHARED with the asset generator (scratchpad make_bezel.py). The game is
 // shrunk into this inset "glass" so it lines up with the hole in the frame.
-static const float INSET_X = 0.035f;
+static const float INSET_X = 0.026f;
 static const float INSET_Y = 0.035f;
 
 // Phosphor halation computed INLINE from the frame (no separate glow render
@@ -72,10 +72,10 @@ float3 CrtHalation(float2 uv) {
 // a smooth colour wash (no sharp per-pixel mirror) so the spill onto the frame
 // has no hard gradients.
 float3 EdgeGlow(float2 uv) {
-    const float2 r1 = 40.0f / gConstants.texSize;
-    const float2 r2 = 90.0f / gConstants.texSize;
-    const float2 r3 = 150.0f / gConstants.texSize;
-    const float2 r4 = 220.0f / gConstants.texSize;
+    const float2 r1 = 220.0f / gConstants.texSize;
+    const float2 r2 = 460.0f / gConstants.texSize;
+    const float2 r3 = 720.0f / gConstants.texSize;
+    const float2 r4 = 1000.0f / gConstants.texSize;
     float3 a = gInput.SampleLevel(gSampler, uv, 0).rgb * 2.0f;
     // ring 1 (axis)
     a += gInput.SampleLevel(gSampler, uv + float2( r1.x, 0), 0).rgb;
@@ -220,7 +220,12 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // rides the curved frame. Soft blurred wash, tapered at the corners.
         const float2 edgeP = clamp(warpedPixel, rectMin, rectMax);
         const float2 rTube = (edgeP - rectMin) / tubeSize;
-        const float2 rUV = (fullMin + saturate(rTube) * fullSize) / gConstants.texSize;
+        // Sample the reflection from the OUTER ~10% band of the game image, NOT
+        // the extreme edge — with the CRT curve / a pillarboxed menu the very
+        // edge is often black (curved-out / bar), which reflected as a wrong
+        // dark spill. Insetting ~6% + the wide blur averages the real edge band.
+        const float2 rTubeInset = 0.06f + 0.88f * rTube;
+        const float2 rUV = (fullMin + rTubeInset * fullSize) / gConstants.texSize;
         const float3 edgeCol = EdgeGlow(rUV);
         const float distPx = length(warpedPixel - edgeP);
         const float bandPx = max(min(INSET_X * fullSize.x, INSET_Y * fullSize.y), 1.0f);

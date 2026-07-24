@@ -135,7 +135,10 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
     // nothing is cropped. Sample the source at the distorted position.
     const float2 srcTube = d * 0.5f + 0.5f;
     const float2 srcPixel = fullMin + saturate(srcTube) * fullSize;
-    const float2 srcUV = srcPixel / gConstants.texSize;
+    // Clamp half a texel inside the content rect so the border sampler never
+    // bleeds black at the edges/corners (that black bleed, poking through the
+    // rounded cutout, was the "square" in the corners).
+    const float2 srcUV = clamp(srcPixel, fullMin + 0.5f, fullMax - 0.5f) / gConstants.texSize;
     float3 color = gInput.SampleLevel(gSampler, srcUV, 0).rgb;
 
     // P22 phosphor color: mild channel crosstalk toward the CRT phosphor
@@ -180,10 +183,10 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
                                   (1.0f - scanStrength * 0.5f), 0.55f);
     color = saturate(color * min(gain, 1.35f));
 
-    // Glass silhouette. Bezel OFF: keep the rounded CRT tube (curved-glass edge
-    // goes black). Bezel ON: the game fills the inset rect as a plain RECTANGLE
-    // and the PNG's square cutout does the masking — using the rounded tubeMask
-    // here left chamfered black wedges in the square corners.
+    // Glass silhouette. Bezel OFF: keep the rounded CRT tube. Bezel ON: the game
+    // fills the inset rect (rectangle) and the PNG's rounded cutout frames it;
+    // the game's sharp corner sits UNDER the frame and the UV clamp above keeps
+    // it from bleeding black — so no rounded game mask is needed.
     float3 glass = bezelOn ? color : (color * tubeMask);
 
     // Bezel overlay: the PNG maps across the FULL presented rect. Src-over the
@@ -222,12 +225,12 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         const float lit = smoothstep(0.14f, 0.40f, dot(edgeCol, float3(0.299f, 0.587f, 0.114f)));
         const float distPx = length(warpedPixel - edgeP);
         const float bandPx = max(min(INSET_X * fullSize.x, INSET_Y * fullSize.y), 1.0f);
-        float reflFall = 1.0f - smoothstep(0.0f, bandPx * 0.6f, distPx);
-        // Gently dim (not hard-cut) the reflection toward the corner squares.
-        // A hard square cut left a visible dark SQUARE in each lit corner; the
-        // black-luma gate already handles genuinely dark/curved-out corners, so
-        // here just a soft, partial roll-off over a wide span (no hard edge).
-        reflFall *= 1.0f - 0.55f * smoothstep(0.0f, bandPx * 1.3f, min(ox, oy));
+        // reflFall uses the EUCLIDEAN distance to the glass rect, so it is
+        // rounded at the corners. NO min(ox,oy) corner suppression — that had
+        // SQUARE contours and drew a visible dark square ("Viereck") in every
+        // corner. The black-luma gate below already kills reflection where the
+        // screen is dark/curved-out, so no extra corner handling is needed.
+        const float reflFall = 1.0f - smoothstep(0.0f, bandPx * 0.6f, distPx);
         // Purely ADDITIVE glow (no darkening of the plastic) scaled by how lit
         // the nearest screen band is — black screen => frame untouched.
         const float3 plastic = b.rgb + edgeCol * (reflFall * lit * 0.5f);

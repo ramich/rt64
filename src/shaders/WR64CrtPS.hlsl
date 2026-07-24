@@ -205,18 +205,14 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // Screen reflection on the inner rim, in the SAME warped space so it
         // rides the curved frame. Soft blurred wash, tapered at the corners.
         const float2 edgeP = clamp(warpedPixel, rectMin, rectMax);
-        // How far this frame pixel sits outside the glass on each axis (the
-        // clamped/"outside" axis is the one perpendicular to the nearest edge).
-        const float ox = max(max(rectMin.x - warpedPixel.x, warpedPixel.x - rectMax.x), 0.0f);
-        const float oy = max(max(rectMin.y - warpedPixel.y, warpedPixel.y - rectMax.y), 0.0f);
         const float2 rTube = (edgeP - rectMin) / tubeSize;
-        // Sample from the OUTER ~10% band of the game — inset ONLY the
-        // perpendicular (outside) axis toward the content; keep the tangential
-        // axis at the true position. Insetting BOTH pulled sideways content (a
-        // menu-panel edge) onto frame sitting over black, which glowed wrongly.
-        const float2 outMask = float2(ox > 0.0f ? 1.0f : 0.0f, oy > 0.0f ? 1.0f : 0.0f);
-        const float2 rTubeInset = lerp(rTube, 0.06f + 0.88f * rTube, outMask);
-        const float2 rUV = (fullMin + rTubeInset * fullSize) / gConstants.texSize;
+        // Sample the reflection at the nearest glass-edge position (NO per-axis
+        // inset). The old inset used a HARD outMask step (ox>0?1:0) that made the
+        // reflection sample jump across the axis boundary at each corner -> a
+        // bright square tab. The 1/32 downsample is already smooth/representative
+        // at the edge, and sampling the true tangential position means a black
+        // region (pillarbox) still reads black -> no menu bleed either.
+        const float2 rUV = (fullMin + rTube * fullSize) / gConstants.texSize;
         // Reflection colour from the 1/32 box-downsampled frame, 3x3-smoothed —
         // a near-uniform soft glow per side, no content structure/"mirror".
         const float3 edgeCol = SampleRefl(rUV);

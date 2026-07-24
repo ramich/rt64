@@ -223,10 +223,11 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         const float distPx = length(warpedPixel - edgeP);
         const float bandPx = max(min(INSET_X * fullSize.x, INSET_Y * fullSize.y), 1.0f);
         float reflFall = 1.0f - smoothstep(0.0f, bandPx * 0.6f, distPx);
-        // Suppress reflection in the CORNER squares (both axes outside): the
-        // adjacent glass corner is usually black (curved-out / bar) even when
-        // content exists a few % inset, so only the straight edges reflect.
-        reflFall *= 1.0f - smoothstep(0.0f, bandPx * 0.35f, min(ox, oy));
+        // Gently dim (not hard-cut) the reflection toward the corner squares.
+        // A hard square cut left a visible dark SQUARE in each lit corner; the
+        // black-luma gate already handles genuinely dark/curved-out corners, so
+        // here just a soft, partial roll-off over a wide span (no hard edge).
+        reflFall *= 1.0f - 0.55f * smoothstep(0.0f, bandPx * 1.3f, min(ox, oy));
         // Purely ADDITIVE glow (no darkening of the plastic) scaled by how lit
         // the nearest screen band is — black screen => frame untouched.
         const float3 plastic = b.rgb + edgeCol * (reflFall * lit * 0.5f);

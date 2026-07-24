@@ -83,6 +83,14 @@ namespace RT64 {
         std::unique_ptr<Texture> wr64BezelTex;
         std::unique_ptr<RenderBuffer> wr64BezelUpload;
         bool wr64BezelLoadTried = false;
+        // WR64 fork: heavily downsampled (1/16) copy of the frame, box-filtered
+        // via the shared boxFilter compute pipeline, sampled as the bezel's
+        // diffuse screen reflection (a per-pixel grid blur couldn't kill large-
+        // feature "mirror" detail; a real downsample does).
+        std::unique_ptr<RenderTexture> wr64ReflSmall;
+        std::unique_ptr<BoxFilterDescriptorSet> wr64ReflDescSet;
+        uint32_t wr64ReflWidth = 0;
+        uint32_t wr64ReflHeight = 0;
         // Object identity of the scratch texture the CRT descriptor set was
         // bound to — size-only tracking can miss a reallocation (the scratch
         // is also lazily recreated by the sharpen pass).

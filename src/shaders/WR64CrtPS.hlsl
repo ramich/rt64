@@ -31,7 +31,8 @@
 
 Texture2D<float4> gInput : register(t1);
 Texture2D<float4> gBezel : register(t2);   // bezel overlay image (RGBA)
-SamplerState gSampler : register(s3);
+Texture2D<float4> gRefl  : register(t3);   // 1/32 box-downsampled frame (reflection source)
+SamplerState gSampler : register(s4);
 
 // Cutout inset of the bezel PNG as a fraction of the presented rect per axis.
 // SHARED with the asset generator (scratchpad make_bezel.py). The game is
@@ -68,36 +69,18 @@ float3 CrtHalation(float2 uv) {
     return acc * knee * knee;
 }
 
-// Wide, knee-free blur of the frame used for the bezel's screen reflection:
-// a smooth colour wash (no sharp per-pixel mirror) so the spill onto the frame
-// has no hard gradients.
-float3 EdgeGlow(float2 uv) {
-    const float2 r1 = 220.0f / gConstants.texSize;
-    const float2 r2 = 460.0f / gConstants.texSize;
-    const float2 r3 = 720.0f / gConstants.texSize;
-    const float2 r4 = 1000.0f / gConstants.texSize;
-    float3 a = gInput.SampleLevel(gSampler, uv, 0).rgb * 2.0f;
-    // ring 1 (axis)
-    a += gInput.SampleLevel(gSampler, uv + float2( r1.x, 0), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(-r1.x, 0), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(0,  r1.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(0, -r1.y), 0).rgb;
-    // ring 2 (diagonal)
-    a += gInput.SampleLevel(gSampler, uv + float2( r2.x,  r2.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(-r2.x, -r2.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2( r2.x, -r2.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(-r2.x,  r2.y), 0).rgb;
-    // ring 3 (wide axis)
-    a += gInput.SampleLevel(gSampler, uv + float2( r3.x, 0), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(-r3.x, 0), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(0,  r3.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(0, -r3.y), 0).rgb;
-    // ring 4 (very wide diagonal) — maximum diffusion
-    a += gInput.SampleLevel(gSampler, uv + float2( r4.x,  r4.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(-r4.x, -r4.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2( r4.x, -r4.y), 0).rgb;
-    a += gInput.SampleLevel(gSampler, uv + float2(-r4.x,  r4.y), 0).rgb;
-    return a / 18.0f;
+// Extra-smooth reflection colour: 3x3 box on the already-1/32 downsampled frame
+// (cheap — tiny texture). Kills the residual per-edge variation so the bezel
+// reflection reads as a near-uniform soft glow per side, not tracking content.
+float3 SampleRefl(float2 uv) {
+    const float2 s = 44.0f / gConstants.texSize;   // ~1.4 texels of the 1/32 image
+    float3 a = float3(0.0f, 0.0f, 0.0f);
+    [unroll] for (int i = -1; i <= 1; ++i) {
+        [unroll] for (int j = -1; j <= 1; ++j) {
+            a += gRefl.SampleLevel(gSampler, uv + float2(i, j) * s, 0).rgb;
+        }
+    }
+    return a / 9.0f;
 }
 
 float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET {
@@ -219,21 +202,34 @@ float4 PSMain(in float4 pos : SV_Position, in float2 uv : TEXCOORD0) : SV_TARGET
         // Screen reflection on the inner rim, in the SAME warped space so it
         // rides the curved frame. Soft blurred wash, tapered at the corners.
         const float2 edgeP = clamp(warpedPixel, rectMin, rectMax);
+        // How far this frame pixel sits outside the glass on each axis (the
+        // clamped/"outside" axis is the one perpendicular to the nearest edge).
+        const float ox = max(max(rectMin.x - warpedPixel.x, warpedPixel.x - rectMax.x), 0.0f);
+        const float oy = max(max(rectMin.y - warpedPixel.y, warpedPixel.y - rectMax.y), 0.0f);
         const float2 rTube = (edgeP - rectMin) / tubeSize;
-        // Sample the reflection from the OUTER ~10% band of the game image, NOT
-        // the extreme edge — with the CRT curve / a pillarboxed menu the very
-        // edge is often black (curved-out / bar), which reflected as a wrong
-        // dark spill. Insetting ~6% + the wide blur averages the real edge band.
-        const float2 rTubeInset = 0.06f + 0.88f * rTube;
+        // Sample from the OUTER ~10% band of the game — inset ONLY the
+        // perpendicular (outside) axis toward the content; keep the tangential
+        // axis at the true position. Insetting BOTH pulled sideways content (a
+        // menu-panel edge) onto frame sitting over black, which glowed wrongly.
+        const float2 outMask = float2(ox > 0.0f ? 1.0f : 0.0f, oy > 0.0f ? 1.0f : 0.0f);
+        const float2 rTubeInset = lerp(rTube, 0.06f + 0.88f * rTube, outMask);
         const float2 rUV = (fullMin + rTubeInset * fullSize) / gConstants.texSize;
-        const float3 edgeCol = EdgeGlow(rUV);
+        // Reflection colour from the 1/32 box-downsampled frame, 3x3-smoothed —
+        // a near-uniform soft glow per side, no content structure/"mirror".
+        const float3 edgeCol = SampleRefl(rUV);
+        // Gate from the SAME smooth source so it has no per-pixel notches: a
+        // dark/near-black region (pillarbox bar, curved-out edge) casts no glow.
+        const float lit = smoothstep(0.14f, 0.40f, dot(edgeCol, float3(0.299f, 0.587f, 0.114f)));
         const float distPx = length(warpedPixel - edgeP);
         const float bandPx = max(min(INSET_X * fullSize.x, INSET_Y * fullSize.y), 1.0f);
         float reflFall = 1.0f - smoothstep(0.0f, bandPx * 0.6f, distPx);
-        const float ox = max(max(rectMin.x - warpedPixel.x, warpedPixel.x - rectMax.x), 0.0f);
-        const float oy = max(max(rectMin.y - warpedPixel.y, warpedPixel.y - rectMax.y), 0.0f);
-        reflFall *= 1.0f - smoothstep(0.0f, bandPx * 0.5f, min(ox, oy));
-        const float3 plastic = b.rgb * (1.0f - 0.45f * reflFall) + edgeCol * (reflFall * 0.95f);
+        // Suppress reflection in the CORNER squares (both axes outside): the
+        // adjacent glass corner is usually black (curved-out / bar) even when
+        // content exists a few % inset, so only the straight edges reflect.
+        reflFall *= 1.0f - smoothstep(0.0f, bandPx * 0.35f, min(ox, oy));
+        // Purely ADDITIVE glow (no darkening of the plastic) scaled by how lit
+        // the nearest screen band is — black screen => frame untouched.
+        const float3 plastic = b.rgb + edgeCol * (reflFall * lit * 0.5f);
 
         composited = lerp(glass, plastic, b.a);
     }

@@ -543,6 +543,17 @@ namespace RT64 {
                             wr64ScratchHeight = scHeight;
                         }
 
+                        // 1/32 downsample target for the bezel reflection.
+                        const uint32_t reflW = std::max(scWidth / 32u, 1u);
+                        const uint32_t reflH = std::max(scHeight / 32u, 1u);
+                        if (wr64ReflSmall == nullptr || wr64ReflWidth != reflW || wr64ReflHeight != reflH) {
+                            wr64ReflSmall = ext.device->createTexture(RenderTextureDesc::Texture2D(reflW, reflH, 1, RenderFormat::B8G8R8A8_UNORM, RenderTextureFlag::STORAGE | RenderTextureFlag::UNORDERED_ACCESS));
+                            wr64ReflDescSet = std::make_unique<BoxFilterDescriptorSet>(ext.device);
+                            wr64ReflWidth = reflW;
+                            wr64ReflHeight = reflH;
+                            wr64CrtDescSet = nullptr;   // force gRefl rebind
+                        }
+
                         // One-time bezel overlay load (assets/crt_bezel.png).
                         // Decoded through the texture cache's PNG path onto this
                         // present command list; kept resident (window-size
@@ -582,6 +593,7 @@ namespace RT64 {
                             // (the shader is told bezel=0 in that case).
                             const RenderTexture *bezelRt = (wr64BezelTex != nullptr) ? wr64BezelTex->texture.get() : wr64Scratch.get();
                             wr64CrtDescSet->setTexture(wr64CrtDescSet->gBezel, bezelRt, RenderTextureLayout::SHADER_READ);
+                            wr64CrtDescSet->setTexture(wr64CrtDescSet->gRefl, wr64ReflSmall.get(), RenderTextureLayout::SHADER_READ);
                             wr64CrtDescBoundScratch = wr64Scratch.get();
                             wr64CrtDescWidth = scWidth;
                             wr64CrtDescHeight = scHeight;
@@ -593,6 +605,30 @@ namespace RT64 {
                         commandList->copyTexture(wr64Scratch.get(), swapChainTexture);
                         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(swapChainTexture, RenderTextureLayout::COLOR_WRITE));
                         commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::SHADER_READ));
+
+                        // Downsample the frame (scratch) to 1/16 via the shared
+                        // box-filter compute pipeline — the smooth, structureless
+                        // reflection source. No render pass bound here (compute).
+                        {
+                            wr64ReflDescSet->setTexture(wr64ReflDescSet->gInput, wr64Scratch.get(), RenderTextureLayout::SHADER_READ);
+                            wr64ReflDescSet->setTexture(wr64ReflDescSet->gOutput, wr64ReflSmall.get(), RenderTextureLayout::GENERAL);
+                            struct BoxFilterCB { int32_t Resolution[2]; int32_t ResolutionScale[2]; int32_t Misalignment[2]; } boxCB;
+                            boxCB.Resolution[0] = int32_t(scWidth); boxCB.Resolution[1] = int32_t(scHeight);
+                            boxCB.ResolutionScale[0] = 32; boxCB.ResolutionScale[1] = 32;
+                            boxCB.Misalignment[0] = 0; boxCB.Misalignment[1] = 0;
+                            RenderTextureBarrier reflBarriers[] = {
+                                RenderTextureBarrier(wr64Scratch.get(), RenderTextureLayout::SHADER_READ),
+                                RenderTextureBarrier(wr64ReflSmall.get(), RenderTextureLayout::GENERAL)
+                            };
+                            commandList->barriers(RenderBarrierStage::COMPUTE, reflBarriers, 2u);
+                            commandList->setPipeline(ext.shaderLibrary->boxFilter.pipeline.get());
+                            commandList->setComputePipelineLayout(ext.shaderLibrary->boxFilter.pipelineLayout.get());
+                            commandList->setComputePushConstants(0, &boxCB);
+                            commandList->setComputeDescriptorSet(wr64ReflDescSet->get(), 0);
+                            commandList->dispatch((reflW + 7u) / 8u, (reflH + 7u) / 8u, 1);
+                            commandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(wr64ReflSmall.get(), RenderTextureLayout::SHADER_READ));
+                        }
+
                         commandList->setFramebuffer(swapChainFramebuffer);
 
                         commandList->setPipeline(crtShader.pipeline.get());

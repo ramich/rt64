@@ -681,13 +681,15 @@ namespace RT64 {
     struct WR64CrtDescriptorSet : RenderDescriptorSetBase {
         uint32_t gInput;
         uint32_t gBezel;
+        uint32_t gRefl;
         uint32_t gSampler;
 
         WR64CrtDescriptorSet(const RenderSampler *sampler, RenderDevice *device = nullptr) {
             builder.begin();
             gInput = builder.addTexture(1);
             gBezel = builder.addTexture(2);
-            gSampler = builder.addImmutableSampler(3, &sampler);
+            gRefl = builder.addTexture(3);   // downsampled frame for the diffuse bezel reflection
+            gSampler = builder.addImmutableSampler(4, &sampler);
             builder.end();
 
             if (device != nullptr) {
